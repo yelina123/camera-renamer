@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.spec
+build/
+dist/
+.venv/
+venv/
+shot_*.png
+screenshot.py
+tmp/
