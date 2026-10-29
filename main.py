@@ -1,29 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-相机照片批量重命名工具
+相机照片工具：批量重命名 + 批量替换内容
 - PySide6 + qfluentwidgets
 - OPPO Sans 字体（免费商用）
-- 支持拖拽、文件夹选择、排序、前缀+编号命名、复制到新目录/原地重命名
 """
 import os
 import sys
 import shutil
-import webbrowser
+import datetime
 from dataclasses import dataclass
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontDatabase, QFont, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QTableWidgetItem, QHeaderView, QMessageBox, QSpinBox, QLabel,
+    QTableWidgetItem, QHeaderView, QMessageBox, QSpinBox,
 )
 from qfluentwidgets import (
     FluentWindow, NavigationItemPosition, setTheme, Theme,
     PushButton, ComboBox, CheckBox, LineEdit, BodyLabel,
     CaptionLabel, CardWidget, StrongBodyLabel, InfoBar, InfoBarPosition,
     FluentIcon as FIF, RadioButton, PrimaryPushButton, HyperlinkLabel,
+    TableWidget,
 )
 
-APP_TITLE = "相机照片批量重命名"
+APP_TITLE = "相机照片工具"
 GITHUB_URL = "https://github.com/yelina123/camera-renamer"
 
 
@@ -33,12 +33,11 @@ def resource_path(rel: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 数据模型
+# 数据模型 & 公共工具
 # ---------------------------------------------------------------------------
 @dataclass
 class FileItem:
     path: str
-    new_name: str = ""
 
     @property
     def name(self) -> str:
@@ -50,375 +49,518 @@ class FileItem:
 
     @property
     def size(self) -> int:
-        try:
-            return os.path.getsize(self.path)
-        except OSError:
-            return 0
+        try: return os.path.getsize(self.path)
+        except OSError: return 0
 
     @property
     def mtime(self) -> float:
-        try:
-            return os.path.getmtime(self.path)
-        except OSError:
-            return 0.0
+        try: return os.path.getmtime(self.path)
+        except OSError: return 0.0
+
+
+def add_paths(items: list[FileItem], paths: list[str]) -> int:
+    existing = {it.path for it in items}
+    added = 0
+    for p in paths:
+        p = os.path.abspath(p)
+        if p in existing or not os.path.isfile(p):
+            continue
+        items.append(FileItem(p))
+        existing.add(p)
+        added += 1
+    return added
+
+
+def sort_items(items: list[FileItem], key: str, asc: bool):
+    kf = {"name": lambda it: it.name.lower(),
+          "mtime": lambda it: it.mtime,
+          "size": lambda it: it.size}[key]
+    items.sort(key=kf, reverse=not asc)
+
+
+def size_str(n: int) -> str:
+    kb = n / 1024
+    return f"{kb:.1f} KB" if kb < 1024 else f"{kb/1024:.2f} MB"
+
+
+def make_table(table: TableWidget, headers: list[str]):
+    table.setColumnCount(len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.verticalHeader().hide()
+    table.setEditTriggers(TableWidget.NoEditTriggers)
+    table.setSelectionBehavior(TableWidget.SelectRows)
+    table.setBorderVisible(True)
+    table.setBorderRadius(8)
+    h = table.horizontalHeader()
+    h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+    for i in range(1, len(headers) - 1):
+        h.setSectionResizeMode(i, QHeaderView.Stretch)
+    h.setSectionResizeMode(len(headers) - 1, QHeaderView.ResizeToContents)
 
 
 # ---------------------------------------------------------------------------
-# 页面一：文件列表
+# 主页
 # ---------------------------------------------------------------------------
-class FileListPage(QWidget):
+class HomePage(QWidget):
+    goRename = Signal()
+    goReplace = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(40, 40, 40, 40)
+        lay.setSpacing(16)
+        title = StrongBodyLabel("相机照片工具", self)
+        title.setStyleSheet("font-size:22px;")
+        lay.addWidget(title)
+        lay.addWidget(BodyLabel("选择你要做的事：", self))
+        lay.addStretch(1)
+
+        row = QHBoxLayout()
+        row.setSpacing(20)
+        c1 = CardWidget(self)
+        l1 = QVBoxLayout(c1)
+        l1.setContentsMargins(24, 24, 24, 24)
+        l1.setSpacing(10)
+        l1.addWidget(StrongBodyLabel("📝 批量重命名", self))
+        l1.addWidget(BodyLabel("给文件加前缀和编号\n例如 DSC001.jpg, DSC002.jpg", self))
+        l1.addStretch(1)
+        b1 = PrimaryPushButton("进入重命名", self)
+        b1.clicked.connect(self.goRename.emit)
+        l1.addWidget(b1)
+        row.addWidget(c1, 1)
+
+        c2 = CardWidget(self)
+        l2 = QVBoxLayout(c2)
+        l2.setContentsMargins(24, 24, 24, 24)
+        l2.setSpacing(10)
+        l2.addWidget(StrongBodyLabel("🔄 批量替换内容", self))
+        l2.addWidget(BodyLabel("保留旧文件名，用新文件内容覆盖\n例如把 a.jpg 的内容换成新拍的 raw", self))
+        l2.addStretch(1)
+        b2 = PrimaryPushButton("进入替换", self)
+        b2.clicked.connect(self.goReplace.emit)
+        l2.addWidget(b2)
+        row.addWidget(c2, 1)
+        lay.addLayout(row)
+        lay.addStretch(2)
+
+
+# ---------------------------------------------------------------------------
+# 重命名：文件列表
+# ---------------------------------------------------------------------------
+class RenameFilePage(QWidget):
     itemsChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.items: list[FileItem] = []
-        self.sort_key = "name"
-        self.sort_asc = True
-        self._build_ui()
-        self.setAcceptDrops(True)
+        self.sort_key = "name"; self.sort_asc = True
+        self._build(); self.setAcceptDrops(True)
 
-    def _build_ui(self):
+    def _build(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.setSpacing(10)
-
+        lay.setContentsMargins(20, 20, 20, 20); lay.setSpacing(10)
         bar = QHBoxLayout()
-        self.btn_add_files = PushButton("添加文件", self, FIF.FOLDER)
-        self.btn_add_dir = PushButton("添加文件夹", self, FIF.IOT)
-        self.btn_remove = PushButton("移除选中", self, FIF.DELETE)
-        self.btn_clear = PushButton("清空", self, FIF.CANCEL)
-        self.sort_combo = ComboBox(self)
-        self.sort_combo.addItems([
-            "按名称 ↑", "按名称 ↓",
-            "按修改时间 ↑", "按修改时间 ↓",
-            "按大小 ↑", "按大小 ↓",
-        ])
-        self.sort_combo.setCurrentIndex(1)
-        bar.addWidget(self.btn_add_files)
-        bar.addWidget(self.btn_add_dir)
-        bar.addWidget(self.btn_remove)
-        bar.addWidget(self.btn_clear)
+        self.btn_add = PushButton("添加文件", self, FIF.FOLDER)
+        self.btn_dir = PushButton("添加文件夹", self, FIF.IOT)
+        self.btn_rm = PushButton("移除选中", self, FIF.DELETE)
+        self.btn_clr = PushButton("清空", self, FIF.CANCEL)
+        self.sort = ComboBox(self)
+        self.sort.addItems(["名称↑", "名称↓", "时间↑", "时间↓", "大小↑", "大小↓"])
+        self.sort.setCurrentIndex(1)
+        for w in (self.btn_add, self.btn_dir, self.btn_rm, self.btn_clr):
+            bar.addWidget(w)
         bar.addStretch(1)
-        bar.addWidget(CaptionLabel("排序方式：", self))
-        bar.addWidget(self.sort_combo)
+        bar.addWidget(CaptionLabel("排序：", self))
+        bar.addWidget(self.sort)
         lay.addLayout(bar)
 
-        from qfluentwidgets import TableWidget
         self.table = TableWidget(self)
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["#", "原文件名", "新文件名（预览）", "大小"])
-        self.table.verticalHeader().hide()
-        self.table.setEditTriggers(TableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(TableWidget.SelectRows)
-        self.table.setBorderVisible(True)
-        self.table.setBorderRadius(8)
+        make_table(self.table, ["#", "原文件名", "新文件名（预览）", "大小"])
+        lay.addWidget(self.table, 1)
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.Stretch)
         h.setSectionResizeMode(2, QHeaderView.Stretch)
-        h.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        lay.addWidget(self.table, 1)
 
         self.hint = CaptionLabel("提示：可直接把文件或文件夹拖到本窗口", self)
         self.hint.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.hint)
 
-        self.btn_add_files.clicked.connect(self._pick_files)
-        self.btn_add_dir.clicked.connect(self._pick_dir)
-        self.btn_remove.clicked.connect(self._remove_selected)
-        self.btn_clear.clicked.connect(self._clear)
-        self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        self.btn_add.clicked.connect(self._pick_files)
+        self.btn_dir.clicked.connect(self._pick_dir)
+        self.btn_rm.clicked.connect(self._remove)
+        self.btn_clr.clicked.connect(self._clear)
+        self.sort.currentIndexChanged.connect(self._onsort)
 
-    def dragEnterEvent(self, e: QDragEnterEvent):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls(): e.acceptProposedAction()
 
-    def dropEvent(self, e: QDropEvent):
+    def dropEvent(self, e):
         paths = []
         for url in e.mimeData().urls():
             p = url.toLocalFile()
-            if not p:
-                continue
+            if not p: continue
             if os.path.isdir(p):
-                for root, _, files in os.walk(p):
-                    for f in files:
-                        paths.append(os.path.join(root, f))
+                for r, _, fs in os.walk(p):
+                    for f in fs: paths.append(os.path.join(r, f))
             elif os.path.isfile(p):
                 paths.append(p)
-        self._add_paths(paths)
+        self._add(paths)
 
     def _pick_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "选择照片", "")
-        self._add_paths(files)
+        fs, _ = QFileDialog.getOpenFileNames(self, "选择照片", "")
+        self._add(fs)
 
     def _pick_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择文件夹")
-        if not d:
-            return
+        if not d: return
         paths = []
-        for root, _, files in os.walk(d):
-            for f in files:
-                paths.append(os.path.join(root, f))
-        self._add_paths(paths)
+        for r, _, fs in os.walk(d):
+            for f in fs: paths.append(os.path.join(r, f))
+        self._add(paths)
 
-    def _add_paths(self, paths):
-        existing = {it.path for it in self.items}
-        added = 0
-        for p in paths:
-            p = os.path.abspath(p)
-            if p in existing:
-                continue
-            if os.path.isfile(p):
-                self.items.append(FileItem(p))
-                existing.add(p)
-                added += 1
-        if added:
-            self._apply_sort()
-            self.refresh_table()
+    def _add(self, paths):
+        if add_paths(self.items, paths):
+            sort_items(self.items, self.sort_key, self.sort_asc)
+            self.refresh()
             self.itemsChanged.emit()
 
-    def _remove_selected(self):
+    def _remove(self):
         rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
         for r in rows:
-            if 0 <= r < len(self.items):
-                self.items.pop(r)
-        self.refresh_table()
-        self.itemsChanged.emit()
+            if 0 <= r < len(self.items): self.items.pop(r)
+        self.refresh(); self.itemsChanged.emit()
 
     def _clear(self):
-        self.items.clear()
-        self.refresh_table()
-        self.itemsChanged.emit()
+        self.items.clear(); self.refresh(); self.itemsChanged.emit()
 
-    def _on_sort_changed(self, idx):
-        key_map = [
-            ("name", True), ("name", False),
-            ("mtime", True), ("mtime", False),
-            ("size", True), ("size", False),
-        ]
-        self.sort_key, self.sort_asc = key_map[idx]
-        self._apply_sort()
-        self.refresh_table()
-        self.itemsChanged.emit()
+    def _onsort(self, idx):
+        km = [("name", True), ("name", False), ("mtime", True),
+              ("mtime", False), ("size", True), ("size", False)]
+        self.sort_key, self.sort_asc = km[idx]
+        sort_items(self.items, self.sort_key, self.sort_asc)
+        self.refresh(); self.itemsChanged.emit()
 
-    def _apply_sort(self):
-        key_func = {
-            "name": lambda it: it.name.lower(),
-            "mtime": lambda it: it.mtime,
-            "size": lambda it: it.size,
-        }[self.sort_key]
-        self.items.sort(key=key_func, reverse=not self.sort_asc)
-
-    def refresh_table(self, new_names=None):
+    def refresh(self, new_names=None):
         self.table.setRowCount(len(self.items))
         for i, it in enumerate(self.items):
-            size_kb = it.size / 1024
-            size_txt = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.2f} MB"
-            nn = new_names[i] if new_names else it.new_name
-            vals = [str(i + 1), it.name, nn, size_txt]
+            nn = new_names[i] if new_names else ""
+            vals = [str(i + 1), it.name, nn, size_str(it.size)]
             for c, v in enumerate(vals):
                 item = QTableWidgetItem(v)
-                if c == 0:
-                    item.setTextAlignment(Qt.AlignCenter)
+                if c == 0: item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(i, c, item)
 
 
 # ---------------------------------------------------------------------------
-# 页面二：命名规则
+# 重命名：命名规则
 # ---------------------------------------------------------------------------
-class NamingRulePage(CardWidget):
+class RenameRulePage(CardWidget):
     ruleChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(14)
-
+        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(14)
         lay.addWidget(StrongBodyLabel("命名格式", self))
 
-        # 前缀行
-        row1 = QHBoxLayout()
-        row1.addWidget(BodyLabel("前缀：", self))
+        r1 = QHBoxLayout()
+        r1.addWidget(BodyLabel("前缀：", self))
         self.prefix = LineEdit(self)
         self.prefix.setPlaceholderText("例如 DSC（可留空）")
-        row1.addWidget(self.prefix, 1)
-        row1.addWidget(BodyLabel("分隔符：", self))
-        self.sep = ComboBox(self)
-        self.sep.addItems(["无", "_", "-"])
-        row1.addWidget(self.sep)
-        lay.addLayout(row1)
+        r1.addWidget(self.prefix, 1)
+        r1.addWidget(BodyLabel("分隔符：", self))
+        self.sep = ComboBox(self); self.sep.addItems(["无", "_", "-"])
+        r1.addWidget(self.sep)
+        lay.addLayout(r1)
 
-        # 编号行（原生 QSpinBox，箭头在右边）
-        row2 = QHBoxLayout()
-        row2.addWidget(BodyLabel("起始号：", self))
-        self.start = QSpinBox(self)
-        self.start.setRange(1, 999999)
-        self.start.setValue(1)
-        self.start.setFixedWidth(110)
-        row2.addWidget(self.start)
+        r2 = QHBoxLayout()
+        r2.addWidget(BodyLabel("起始号：", self))
+        self.start = QSpinBox(self); self.start.setRange(1, 999999); self.start.setValue(1)
+        self.start.setFixedWidth(110); r2.addWidget(self.start)
+        r2.addWidget(BodyLabel("终止号：", self))
+        self.end = QSpinBox(self); self.end.setRange(0, 999999); self.end.setValue(0)
+        self.end.setSpecialValueText("自动"); self.end.setFixedWidth(110)
+        r2.addWidget(self.end)
+        self.zfill = CheckBox("补零到", self); self.zfill.setChecked(True)
+        r2.addWidget(self.zfill)
+        self.digits = QSpinBox(self); self.digits.setRange(1, 10); self.digits.setValue(3)
+        self.digits.setFixedWidth(70); r2.addWidget(self.digits)
+        r2.addWidget(BodyLabel("位", self)); r2.addStretch(1)
+        lay.addLayout(r2)
 
-        row2.addWidget(BodyLabel("终止号：", self))
-        self.end = QSpinBox(self)
-        self.end.setRange(0, 999999)
-        self.end.setValue(0)
-        self.end.setSpecialValueText("自动")
-        self.end.setFixedWidth(110)
-        row2.addWidget(self.end)
-
-        self.zfill_cb = CheckBox("补零到", self)
-        self.zfill_cb.setChecked(True)
-        row2.addWidget(self.zfill_cb)
-
-        self.digits = QSpinBox(self)
-        self.digits.setRange(1, 10)
-        self.digits.setValue(3)
-        self.digits.setFixedWidth(70)
-        row2.addWidget(self.digits)
-        row2.addWidget(BodyLabel("位", self))
-        row2.addStretch(1)
-        lay.addLayout(row2)
-
-        # 后缀行
-        row3 = QHBoxLayout()
-        row3.addWidget(BodyLabel("固定后缀：", self))
-        self.fixed_suffix = LineEdit(self)
-        self.fixed_suffix.setPlaceholderText("例如 _v2（可留空）")
-        self.fixed_suffix.setMaximumWidth(200)
-        row3.addWidget(self.fixed_suffix)
-
-        row3.addWidget(BodyLabel("扩展名：", self))
-        self.force_ext = LineEdit(self)
-        self.force_ext.setPlaceholderText("留空=保留原扩展名，填 .jpg 则强制改")
-        self.force_ext.setMaximumWidth(240)
-        row3.addWidget(self.force_ext, 1)
-        lay.addLayout(row3)
+        r3 = QHBoxLayout()
+        r3.addWidget(BodyLabel("固定后缀：", self))
+        self.fsuffix = LineEdit(self); self.fsuffix.setPlaceholderText("例如 _v2（可留空）")
+        self.fsuffix.setMaximumWidth(200); r3.addWidget(self.fsuffix)
+        r3.addWidget(BodyLabel("扩展名：", self))
+        self.forcext = LineEdit(self)
+        self.forcext.setPlaceholderText("留空=保留原扩展名，填 .jpg 则强制改")
+        self.forcext.setMaximumWidth(240); r3.addWidget(self.forcext, 1)
+        lay.addLayout(r3)
 
         lay.addWidget(StrongBodyLabel("实时预览", self))
         self.preview = BodyLabel("示例：DSC001.jpg", self)
         self.preview.setStyleSheet("color:#0067c0; font-size:14px;")
         lay.addWidget(self.preview)
-
         lay.addStretch(1)
 
-        # 信号
         self.prefix.textChanged.connect(self._emit)
         self.sep.currentIndexChanged.connect(self._emit)
         self.start.valueChanged.connect(self._emit)
         self.end.valueChanged.connect(self._emit)
         self.digits.valueChanged.connect(self._emit)
-        self.zfill_cb.stateChanged.connect(self._on_zfill_changed)
-        self.fixed_suffix.textChanged.connect(self._emit)
-        self.force_ext.textChanged.connect(self._emit)
-        self._on_zfill_changed()
+        self.zfill.stateChanged.connect(self._onzfill)
+        self.fsuffix.textChanged.connect(self._emit)
+        self.forcext.textChanged.connect(self._emit)
+        self._onzfill()
 
-    def _on_zfill_changed(self):
-        self.digits.setEnabled(self.zfill_cb.isChecked())
+    def _onzfill(self): self.digits.setEnabled(self.zfill.isChecked())
+    def _emit(self, *a): self.ruleChanged.emit()
 
-    def _emit(self, *args):
-        self.ruleChanged.emit()
-
-    def compute_new_name(self, index: int, ext: str) -> str:
+    def compute(self, index: int, ext: str) -> str:
         n = self.start.value() + index
         prefix = self.prefix.text().strip()
-        sep_map = {0: "", 1: "_", 2: "-"}
-        sep = sep_map[self.sep.currentIndex()]
-        if self.zfill_cb.isChecked():
-            num = str(n).zfill(self.digits.value())
-        else:
-            num = str(n)
+        sep = {0: "", 1: "_", 2: "-"}[self.sep.currentIndex()]
+        num = str(n).zfill(self.digits.value()) if self.zfill.isChecked() else str(n)
         name = f"{prefix}{sep}{num}" if prefix else num
-        fs = self.fixed_suffix.text().strip()
-        if fs:
-            name += fs
-        # 扩展名：强制扩展名优先
-        fe = self.force_ext.text().strip()
+        fs = self.fsuffix.text().strip()
+        if fs: name += fs
+        fe = self.forcext.text().strip()
         if fe:
-            if not fe.startswith("."):
-                fe = "." + fe
+            if not fe.startswith("."): fe = "." + fe
             name += fe
         else:
             name += ext
         return name
 
-    def refresh_preview(self, example_ext=".jpg"):
-        self.preview.setText(f"示例：{self.compute_new_name(0, example_ext)}")
+    def refresh_preview(self, ext=".jpg"):
+        self.preview.setText(f"示例：{self.compute(0, ext)}")
 
 
 # ---------------------------------------------------------------------------
-# 页面三：输出设置
+# 重命名：输出
 # ---------------------------------------------------------------------------
-class OutputPage(CardWidget):
+class RenameOutputPage(CardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(14)
-
+        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(14)
         lay.addWidget(StrongBodyLabel("输出位置", self))
-
         self.rb_copy = RadioButton("复制到新目录（推荐，原文件不动）", self)
-        self.rb_copy.setChecked(True)
-        lay.addWidget(self.rb_copy)
-
-        row_dir = QHBoxLayout()
-        self.dir_edit = LineEdit(self)
-        self.dir_edit.setPlaceholderText("选择一个空目录或新目录，重命名后的文件会复制到这里")
-        self.btn_browse = PushButton("浏览…", self, FIF.FOLDER)
-        row_dir.addWidget(self.dir_edit, 1)
-        row_dir.addWidget(self.btn_browse)
-        lay.addLayout(row_dir)
-
-        self.rb_inplace = RadioButton("原地重命名（直接修改原文件名，不可撤销）", self)
-        self.rb_inplace.setStyleSheet("color:#c42b1c;")
-        lay.addWidget(self.rb_inplace)
-
+        self.rb_copy.setChecked(True); lay.addWidget(self.rb_copy)
+        rd = QHBoxLayout()
+        self.dir = LineEdit(self); self.dir.setPlaceholderText("选择输出目录")
+        self.browse = PushButton("浏览…", self, FIF.FOLDER)
+        rd.addWidget(self.dir, 1); rd.addWidget(self.browse)
+        lay.addLayout(rd)
+        self.rb_in = RadioButton("原地重命名（直接改原文件名，不可撤销）", self)
+        self.rb_in.setStyleSheet("color:#c42b1c;"); lay.addWidget(self.rb_in)
         lay.addWidget(StrongBodyLabel("目标目录已存在同名文件时", self))
-        self.conflict = ComboBox(self)
-        self.conflict.addItems(["跳过", "覆盖", "中止并报错"])
+        self.conflict = ComboBox(self); self.conflict.addItems(["跳过", "覆盖", "中止并报错"])
         lay.addWidget(self.conflict)
-
         lay.addStretch(1)
-
         self.btn_run = PrimaryPushButton("执行重命名", self, FIF.ACCEPT)
-        self.btn_run.setFixedHeight(40)
-        self.btn_run.setMinimumWidth(200)
+        self.btn_run.setFixedHeight(40); self.btn_run.setMinimumWidth(200)
         lay.addWidget(self.btn_run, 0, Qt.AlignRight)
+        self.browse.clicked.connect(self._pick)
+        self.rb_copy.toggled.connect(self._onmode)
 
-        self.btn_browse.clicked.connect(self._pick_dir)
-        self.rb_copy.toggled.connect(self._on_mode_changed)
-
-    def _pick_dir(self):
+    def _pick(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
-        if d:
-            self.dir_edit.setText(d)
+        if d: self.dir.setText(d)
 
-    def _on_mode_changed(self):
-        is_copy = self.rb_copy.isChecked()
-        self.dir_edit.setEnabled(is_copy)
-        self.btn_browse.setEnabled(is_copy)
-        self.conflict.setEnabled(is_copy)
+    def _onmode(self):
+        c = self.rb_copy.isChecked()
+        self.dir.setEnabled(c); self.browse.setEnabled(c); self.conflict.setEnabled(c)
 
 
 # ---------------------------------------------------------------------------
-# 页面四：关于
+# 替换页
+# ---------------------------------------------------------------------------
+class ReplacePage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.old: list[FileItem] = []
+        self.new: list[FileItem] = []
+        self.ok = "name"; self.oasc = True
+        self.nk = "name"; self.nasc = True
+        self._build(); self.setAcceptDrops(True)
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16); lay.setSpacing(10)
+
+        top = QHBoxLayout(); top.setSpacing(10)
+        # 左
+        lc = QVBoxLayout()
+        lc.addWidget(StrongBodyLabel("旧文件（保留文件名）", self))
+        lb = QHBoxLayout()
+        self.oa = PushButton("添加", self, FIF.FOLDER)
+        self.od = PushButton("文件夹", self, FIF.IOT)
+        self.oc = PushButton("清空", self, FIF.CANCEL)
+        self.os = ComboBox(self)
+        self.os.addItems(["名称↑", "名称↓", "时间↑", "时间↓", "大小↑", "大小↓"])
+        for w in (self.oa, self.od, self.oc): lb.addWidget(w)
+        lb.addStretch(1); lb.addWidget(CaptionLabel("排序：", self)); lb.addWidget(self.os)
+        lc.addLayout(lb)
+        self.ot = TableWidget(self); make_table(self.ot, ["#", "文件名", "大小"])
+        lc.addWidget(self.ot, 1)
+        top.addLayout(lc, 1)
+        # 右
+        rc = QVBoxLayout()
+        rc.addWidget(StrongBodyLabel("新文件（提供内容）", self))
+        rb = QHBoxLayout()
+        self.na = PushButton("添加", self, FIF.FOLDER)
+        self.nd = PushButton("文件夹", self, FIF.IOT)
+        self.nc = PushButton("清空", self, FIF.CANCEL)
+        self.ns = ComboBox(self)
+        self.ns.addItems(["名称↑", "名称↓", "时间↑", "时间↓", "大小↑", "大小↓"])
+        for w in (self.na, self.nd, self.nc): rb.addWidget(w)
+        rb.addStretch(1); rb.addWidget(CaptionLabel("排序：", self)); rb.addWidget(self.ns)
+        rc.addLayout(rb)
+        self.nt = TableWidget(self); make_table(self.nt, ["#", "文件名", "大小"])
+        rc.addWidget(self.nt, 1)
+        top.addLayout(rc, 1)
+        lay.addLayout(top, 2)
+
+        lay.addWidget(StrongBodyLabel("对应关系", self))
+        self.mt = TableWidget(self)
+        make_table(self.mt, ["#", "旧文件（保留名）", "←", "新文件（内容来源）"])
+        lay.addWidget(self.mt, 2)
+
+        bot = QHBoxLayout()
+        self.bak = CheckBox("替换前备份旧文件到 _backup_时间戳/ 子目录", self)
+        self.bak.setChecked(True)
+        bot.addWidget(self.bak); bot.addStretch(1)
+        self.run = PrimaryPushButton("执行替换", self, FIF.ACCEPT)
+        self.run.setFixedHeight(38); bot.addWidget(self.run)
+        lay.addLayout(bot)
+
+        self.oa.clicked.connect(lambda: self._pick(self.old, "选择旧文件"))
+        self.od.clicked.connect(lambda: self._pick_dir(self.old))
+        self.oc.clicked.connect(lambda: self._clear(self.old))
+        self.na.clicked.connect(lambda: self._pick(self.new, "选择新文件"))
+        self.nd.clicked.connect(lambda: self._pick_dir(self.new))
+        self.nc.clicked.connect(lambda: self._clear(self.new))
+        self.os.currentIndexChanged.connect(lambda i: self._sort(i, "old"))
+        self.ns.currentIndexChanged.connect(lambda i: self._sort(i, "new"))
+        self.run.clicked.connect(self._exec)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls(): e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        paths = []
+        for url in e.mimeData().urls():
+            p = url.toLocalFile()
+            if not p: continue
+            if os.path.isdir(p):
+                for r, _, fs in os.walk(p):
+                    for f in fs: paths.append(os.path.join(r, f))
+            elif os.path.isfile(p):
+                paths.append(p)
+        if add_paths(self.old, paths):
+            sort_items(self.old, self.ok, self.oasc); self._refresh()
+
+    def _pick(self, items, title):
+        fs, _ = QFileDialog.getOpenFileNames(self, title, "")
+        if add_paths(items, fs): self._refresh()
+
+    def _pick_dir(self, items):
+        d = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if not d: return
+        paths = []
+        for r, _, fs in os.walk(d):
+            for f in fs: paths.append(os.path.join(r, f))
+        if add_paths(items, paths): self._refresh()
+
+    def _clear(self, items):
+        items.clear(); self._refresh()
+
+    def _sort(self, idx, side):
+        km = [("name", True), ("name", False), ("mtime", True),
+              ("mtime", False), ("size", True), ("size", False)]
+        k, a = km[idx]
+        if side == "old":
+            self.ok, self.oasc = k, a; sort_items(self.old, k, a)
+        else:
+            self.nk, self.nasc = k, a; sort_items(self.new, k, a)
+        self._refresh()
+
+    def _fill(self, table: TableWidget, items: list[FileItem]):
+        table.setRowCount(len(items))
+        for i, it in enumerate(items):
+            for c, v in enumerate([str(i + 1), it.name, size_str(it.size)]):
+                item = QTableWidgetItem(v)
+                if c == 0: item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(i, c, item)
+
+    def _refresh(self):
+        self._fill(self.ot, self.old)
+        self._fill(self.nt, self.new)
+        n = max(len(self.old), len(self.new))
+        self.mt.setRowCount(n)
+        for i in range(n):
+            o = self.old[i].name if i < len(self.old) else "—"
+            nw = self.new[i].name if i < len(self.new) else "—"
+            arrow = "←" if (i < len(self.old) and i < len(self.new)) else ""
+            for c, v in enumerate([str(i + 1), o, arrow, nw]):
+                item = QTableWidgetItem(v)
+                if c in (0, 2): item.setTextAlignment(Qt.AlignCenter)
+                self.mt.setItem(i, c, item)
+
+    def _exec(self):
+        if not self.old:
+            InfoBar.warning("空", "请先添加旧文件", self, position=InfoBarPosition.TOP, duration=2500); return
+        if not self.new:
+            InfoBar.warning("空", "请先添加新文件", self, position=InfoBarPosition.TOP, duration=2500); return
+        pairs = min(len(self.old), len(self.new))
+        eo = len(self.old) - pairs
+        en = len(self.new) - pairs
+        msg = f"将替换 {pairs} 个文件。"
+        if eo > 0: msg += f"\n{eo} 个旧文件无对应新文件，将保留不动。"
+        if en > 0: msg += f"\n{en} 个新文件无对应旧文件，将被忽略。"
+        if not self.bak.isChecked(): msg += "\n\n⚠ 未开启备份，旧文件将被直接覆盖！"
+        ret = QMessageBox.question(self, "确认替换", msg,
+                                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes: return
+
+        bdir = None
+        if self.bak.isChecked():
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            bdir = os.path.join(os.path.dirname(self.old[0].path), f"_backup_{ts}")
+            os.makedirs(bdir, exist_ok=True)
+
+        ok = fail = 0
+        for i in range(pairs):
+            old = self.old[i].path; new = self.new[i].path
+            try:
+                if bdir:
+                    shutil.copy2(old, os.path.join(bdir, os.path.basename(old)))
+                shutil.copy2(new, old)
+                ok += 1
+            except OSError as e:
+                fail += 1; print("replace failed:", e)
+        InfoBar.success("完成",
+                        f"替换成功 {ok} 个，失败 {fail} 个" +
+                        (f"，备份在 {bdir}" if bdir else ""),
+                        self, position=InfoBarPosition.TOP, duration=5000)
+
+
+# ---------------------------------------------------------------------------
+# 关于
 # ---------------------------------------------------------------------------
 class AboutPage(CardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(12)
-
+        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(12)
         lay.addWidget(StrongBodyLabel("关于", self))
         lay.addWidget(BodyLabel(APP_TITLE, self))
-        lay.addWidget(CaptionLabel("版本 1.0  |  字体：OPPO Sans（免费商用）", self))
-
-        link = HyperlinkLabel("GitHub 仓库", self)
-        link.setUrl(GITHUB_URL)
-        lay.addWidget(link)
-
-        lay.addStretch(1)
+        lay.addWidget(CaptionLabel("版本 1.1  |  字体：OPPO Sans（免费商用）", self))
+        link = HyperlinkLabel("GitHub 仓库", self); link.setUrl(GITHUB_URL)
+        lay.addWidget(link); lay.addStretch(1)
 
 
 # ---------------------------------------------------------------------------
@@ -428,165 +570,109 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1000, 700)
+        self.resize(1100, 750)
 
-        self.file_page = FileListPage(self)
-        self.rule_page = NamingRulePage(self)
-        self.output_page = OutputPage(self)
-        self.about_page = AboutPage(self)
-        self.file_page.setObjectName("filePage")
-        self.rule_page.setObjectName("rulePage")
-        self.output_page.setObjectName("outputPage")
-        self.about_page.setObjectName("aboutPage")
+        self.home = HomePage(self)
+        self.rf = RenameFilePage(self)
+        self.rr = RenameRulePage(self)
+        self.ro = RenameOutputPage(self)
+        self.rp = ReplacePage(self)
+        self.ab = AboutPage(self)
+        for p, n in [(self.home, "home"), (self.rf, "rf"), (self.rr, "rr"),
+                     (self.ro, "ro"), (self.rp, "rp"), (self.ab, "ab")]:
+            p.setObjectName(n)
 
-        self.addSubInterface(self.file_page, FIF.FOLDER, "文件列表")
-        self.addSubInterface(self.rule_page, FIF.EDIT, "命名规则")
-        self.addSubInterface(self.output_page, FIF.SAVE, "输出设置")
-        self.addSubInterface(self.about_page, FIF.INFO, "关于",
-                            position=NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.home, FIF.HOME, "主页")
+        self.addSubInterface(self.rf, FIF.FOLDER, "重命名：文件")
+        self.addSubInterface(self.rr, FIF.EDIT, "重命名：规则")
+        self.addSubInterface(self.ro, FIF.SAVE, "重命名：输出")
+        self.addSubInterface(self.rp, FIF.SYNC, "批量替换")
+        self.addSubInterface(self.ab, FIF.INFO, "关于", position=NavigationItemPosition.BOTTOM)
 
-        self.file_page.itemsChanged.connect(self._refresh_preview)
-        self.rule_page.ruleChanged.connect(self._refresh_preview)
-        self.output_page.btn_run.clicked.connect(self._run)
+        self.rf.itemsChanged.connect(self._rp)
+        self.rr.ruleChanged.connect(self._rp)
+        self.ro.btn_run.clicked.connect(self._run_rename)
+        self.home.goRename.connect(lambda: self.stackedWidget.setCurrentWidget(self.rf))
+        self.home.goReplace.connect(lambda: self.stackedWidget.setCurrentWidget(self.rp))
+        self._rp()
 
-        self._refresh_preview()
+    def _rp(self):
+        items = self.rf.items
+        names = [self.rr.compute(i, it.ext) for i, it in enumerate(items)]
+        self.rf.refresh(names)
+        if items: self.rr.refresh_preview(items[0].ext)
 
-    def _refresh_preview(self):
-        items = self.file_page.items
-        names = [self.rule_page.compute_new_name(i, it.ext) for i, it in enumerate(items)]
-        for it, n in zip(items, names):
-            it.new_name = n
-        self.file_page.refresh_table(names)
-        if items:
-            self.rule_page.refresh_preview(items[0].ext)
-
-    def _run(self):
-        items = self.file_page.items
+    def _run_rename(self):
+        items = self.rf.items
         if not items:
-            InfoBar.warning("空列表", "请先添加照片", self,
-                            position=InfoBarPosition.TOP, duration=2500)
-            return
+            InfoBar.warning("空", "请先添加照片", self, position=InfoBarPosition.TOP, duration=2500); return
+        s = self.rr.start.value(); e = self.rr.end.value()
+        if e > 0 and s > e:
+            InfoBar.error("号段错误", "起始号不能大于终止号", self, position=InfoBarPosition.TOP, duration=3000); return
+        if e > 0 and len(items) > (e - s + 1):
+            InfoBar.error("号段不足", f"需要 {len(items)} 个编号，但 {s}~{e} 只有 {e-s+1} 个",
+                          self, position=InfoBarPosition.TOP, duration=3500); return
+        if self.ro.rb_copy.isChecked(): self._rename_copy(items)
+        else: self._rename_inplace(items)
 
-        start = self.rule_page.start.value()
-        end = self.rule_page.end.value()
-        if end > 0 and start > end:
-            InfoBar.error("号段错误", "起始号不能大于终止号", self,
-                          position=InfoBarPosition.TOP, duration=3000)
-            return
-        if end > 0 and len(items) > (end - start + 1):
-            InfoBar.error("号段不足",
-                          f"需要 {len(items)} 个编号，但 {start}~{end} 只有 {end - start + 1} 个",
-                          self, position=InfoBarPosition.TOP, duration=3500)
-            return
-
-        if self.output_page.rb_copy.isChecked():
-            self._run_copy()
-        else:
-            self._run_inplace()
-
-    def _run_copy(self):
-        out_dir = self.output_page.dir_edit.text().strip()
-        if not out_dir:
-            InfoBar.warning("未选目录", "请先选择输出目录", self,
-                            position=InfoBarPosition.TOP, duration=2500)
-            return
-        os.makedirs(out_dir, exist_ok=True)
-
-        mode = self.output_page.conflict.currentIndex()
-        ok = skip = fail = 0
-        for it in self.file_page.items:
-            target = os.path.join(out_dir, it.new_name)
-            if os.path.exists(target):
-                if mode == 0:
-                    skip += 1
-                    continue
-                elif mode == 2:
-                    InfoBar.error("冲突中止", f"目标已存在：{target}",
-                                  self, position=InfoBarPosition.TOP, duration=4000)
-                    return
-            try:
-                shutil.copy2(it.path, target)
-                ok += 1
-            except OSError as e:
-                fail += 1
-                print("copy failed:", e)
-
-        InfoBar.success("完成", f"复制成功 {ok} 个，跳过 {skip} 个，失败 {fail} 个",
+    def _rename_copy(self, items):
+        d = self.ro.dir.text().strip()
+        if not d:
+            InfoBar.warning("未选目录", "请先选择输出目录", self, position=InfoBarPosition.TOP, duration=2500); return
+        os.makedirs(d, exist_ok=True)
+        mode = self.ro.conflict.currentIndex()
+        ok = sk = fl = 0
+        for i, it in enumerate(items):
+            nn = self.rr.compute(i, it.ext)
+            t = os.path.join(d, nn)
+            if os.path.exists(t):
+                if mode == 0: sk += 1; continue
+                if mode == 2:
+                    InfoBar.error("冲突中止", f"目标已存在：{t}", self, position=InfoBarPosition.TOP, duration=4000); return
+            try: shutil.copy2(it.path, t); ok += 1
+            except OSError: fl += 1
+        InfoBar.success("完成", f"复制成功 {ok} 个，跳过 {sk} 个，失败 {fl} 个",
                         self, position=InfoBarPosition.TOP, duration=3500)
 
-    def _run_inplace(self):
-        ret = QMessageBox.warning(
-            self, "原地重命名确认",
-            "即将直接修改原文件名，不可撤销。建议先备份。\n确定继续？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if ret != QMessageBox.Yes:
-            return
-
-        for it in self.file_page.items:
-            target = os.path.join(os.path.dirname(it.path), it.new_name)
-            if not os.path.exists(target):
-                continue
-            if os.path.abspath(target) == os.path.abspath(it.path):
-                continue
-            InfoBar.error("冲突", f"目标名 {it.new_name} 与目录中已有文件冲突",
-                          self, position=InfoBarPosition.TOP, duration=4000)
-            return
-
-        tmp_map = []
-        for i, it in enumerate(self.file_page.items):
-            tmp_path = os.path.join(os.path.dirname(it.path),
-                                    f"__tmp_rename_{i:05d}__{it.ext}")
+    def _rename_inplace(self, items):
+        ret = QMessageBox.warning(self, "确认", "将直接修改原文件名，不可撤销。继续？",
+                                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes: return
+        for i, it in enumerate(items):
+            nn = self.rr.compute(i, it.ext)
+            t = os.path.join(os.path.dirname(it.path), nn)
+            if os.path.exists(t) and os.path.abspath(t) != os.path.abspath(it.path):
+                InfoBar.error("冲突", f"目标名 {nn} 已存在", self, position=InfoBarPosition.TOP, duration=4000); return
+        tmp = []
+        for i, it in enumerate(items):
+            nn = self.rr.compute(i, it.ext)
+            tp = os.path.join(os.path.dirname(it.path), f"__tmp_{i:05d}__{it.ext}")
             try:
-                os.rename(it.path, tmp_path)
-                tmp_map.append((tmp_path,
-                                os.path.join(os.path.dirname(it.path), it.new_name)))
-            except OSError as e:
-                for old, _ in tmp_map:
-                    try:
-                        os.rename(old, old.rsplit("__", 2)[0] + it.ext)
-                    except OSError:
-                        pass
-                InfoBar.error("失败", f"第一阶段改名失败：{e}",
-                              self, position=InfoBarPosition.TOP, duration=4000)
-                return
-
-        ok = fail = 0
-        for tmp_path, final_path in tmp_map:
-            try:
-                os.rename(tmp_path, final_path)
-                ok += 1
-            except OSError as e:
-                fail += 1
-                print("rename failed:", e)
-
-        InfoBar.success("完成", f"原地重命名成功 {ok} 个，失败 {fail} 个",
+                os.rename(it.path, tp)
+                tmp.append((tp, os.path.join(os.path.dirname(it.path), nn)))
+            except OSError as ex:
+                InfoBar.error("失败", str(ex), self, position=InfoBarPosition.TOP, duration=4000); return
+        ok = fl = 0
+        for a, b in tmp:
+            try: os.rename(a, b); ok += 1
+            except OSError: fl += 1
+        InfoBar.success("完成", f"原地重命名成功 {ok} 个，失败 {fl} 个",
                         self, position=InfoBarPosition.TOP, duration=3500)
 
 
-# ---------------------------------------------------------------------------
-# 入口
-# ---------------------------------------------------------------------------
 def main():
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
-
-    font_path = resource_path(os.path.join("assets", "fonts", "OPPOSans-Regular.ttf"))
-    font_family = "Microsoft YaHei UI"
-    if os.path.exists(font_path):
-        fid = QFontDatabase.addApplicationFont(font_path)
-        families = QFontDatabase.applicationFontFamilies(fid)
-        if families:
-            font_family = families[0]
-    app.setFont(QFont(font_family, 10))
-
+    fp = resource_path(os.path.join("assets", "fonts", "OPPOSans-Regular.ttf"))
+    fam = "Microsoft YaHei UI"
+    if os.path.exists(fp):
+        fid = QFontDatabase.addApplicationFont(fp)
+        fams = QFontDatabase.applicationFontFamilies(fid)
+        if fams: fam = fams[0]
+    app.setFont(QFont(fam, 10))
     setTheme(Theme.LIGHT)
-
-    win = MainWindow()
-    win.show()
+    win = MainWindow(); win.show()
     sys.exit(app.exec())
 
 
