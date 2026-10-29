@@ -6,10 +6,11 @@
 """
 import os
 import sys
+import json
 import shutil
 import datetime
 from dataclasses import dataclass
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSettings
 from PySide6.QtGui import QFontDatabase, QFont, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
@@ -25,11 +26,42 @@ from qfluentwidgets import (
 
 APP_TITLE = "相机照片工具"
 GITHUB_URL = "https://github.com/yelina123/camera-renamer"
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".camera_renamer_settings.json")
 
 
 def resource_path(rel: str) -> str:
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, rel)
+
+
+DEFAULT_SETTINGS = {
+    "rename": {
+        "prefix": "", "sep": 0, "start": 1, "end": 0,
+        "zfill": True, "digits": 3, "fsuffix": "", "forcext": "",
+    },
+    "rename_out": {
+        "mode": "copy", "dir": "", "conflict": 0,
+    },
+    "replace": {
+        "backup": False, "backup_dir": "",
+    },
+}
+
+
+def load_settings() -> dict:
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return json.loads(json.dumps(DEFAULT_SETTINGS))
+
+
+def save_settings(s: dict):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(s, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("save settings failed:", e)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +346,27 @@ class RenameRulePage(CardWidget):
         self.fsuffix.textChanged.connect(self._emit)
         self.forcext.textChanged.connect(self._emit)
         self._onzfill()
+        self.load_defaults()
+
+    def load_defaults(self, d: dict = None):
+        d = d or DEFAULT_SETTINGS["rename"]
+        self.prefix.blockSignals(True); self.prefix.setText(d.get("prefix", "")); self.prefix.blockSignals(False)
+        self.sep.blockSignals(True); self.sep.setCurrentIndex(d.get("sep", 0)); self.sep.blockSignals(False)
+        self.start.blockSignals(True); self.start.setValue(d.get("start", 1)); self.start.blockSignals(False)
+        self.end.blockSignals(True); self.end.setValue(d.get("end", 0)); self.end.blockSignals(False)
+        self.zfill.blockSignals(True); self.zfill.setChecked(d.get("zfill", True)); self.zfill.blockSignals(False)
+        self.digits.blockSignals(True); self.digits.setValue(d.get("digits", 3)); self.digits.blockSignals(False)
+        self.fsuffix.blockSignals(True); self.fsuffix.setText(d.get("fsuffix", "")); self.fsuffix.blockSignals(False)
+        self.forcext.blockSignals(True); self.forcext.setText(d.get("forcext", "")); self.forcext.blockSignals(False)
+        self._onzfill()
+
+    def to_dict(self) -> dict:
+        return {
+            "prefix": self.prefix.text(), "sep": self.sep.currentIndex(),
+            "start": self.start.value(), "end": self.end.value(),
+            "zfill": self.zfill.isChecked(), "digits": self.digits.value(),
+            "fsuffix": self.fsuffix.text(), "forcext": self.forcext.text(),
+        }
 
     def _onzfill(self): self.digits.setEnabled(self.zfill.isChecked())
     def _emit(self, *a): self.ruleChanged.emit()
@@ -365,6 +418,24 @@ class RenameOutputPage(CardWidget):
         lay.addWidget(self.btn_run, 0, Qt.AlignRight)
         self.browse.clicked.connect(self._pick)
         self.rb_copy.toggled.connect(self._onmode)
+        self.load_defaults()
+
+    def load_defaults(self, d: dict = None):
+        d = d or DEFAULT_SETTINGS["rename_out"]
+        if d.get("mode", "copy") == "inplace":
+            self.rb_in.setChecked(True)
+        else:
+            self.rb_copy.setChecked(True)
+        self.dir.setText(d.get("dir", ""))
+        self.conflict.setCurrentIndex(d.get("conflict", 0))
+        self._onmode()
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": "inplace" if self.rb_in.isChecked() else "copy",
+            "dir": self.dir.text(),
+            "conflict": self.conflict.currentIndex(),
+        }
 
     def _pick(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -430,12 +501,25 @@ class ReplacePage(QWidget):
         lay.addWidget(self.mt, 2)
 
         bot = QHBoxLayout()
-        self.bak = CheckBox("替换前备份旧文件到 _backup_时间戳/ 子目录", self)
-        self.bak.setChecked(True)
-        bot.addWidget(self.bak); bot.addStretch(1)
+        self.bak = CheckBox("替换前备份旧文件", self)
+        self.bak.setChecked(False)
+        bot.addWidget(self.bak)
+        bot.addStretch(1)
         self.run = PrimaryPushButton("执行替换", self, FIF.ACCEPT)
         self.run.setFixedHeight(38); bot.addWidget(self.run)
         lay.addLayout(bot)
+
+        # 备份目录行
+        brow = QHBoxLayout()
+        brow.addWidget(CaptionLabel("备份目录（留空=旧文件旁 _backup_时间戳）：", self))
+        self.bakdir = LineEdit(self)
+        self.bakdir.setPlaceholderText("留空则自动在旧文件旁边建备份目录")
+        self.bakbrowse = PushButton("浏览…", self, FIF.FOLDER)
+        brow.addWidget(self.bakdir, 1); brow.addWidget(self.bakbrowse)
+        lay.addLayout(brow)
+        self.bakbrowse.clicked.connect(self._pick_bakdir)
+        self.bak.toggled.connect(lambda: self.bakdir.setEnabled(self.bak.isChecked()))
+        self.bakdir.setEnabled(False)
 
         self.oa.clicked.connect(lambda: self._pick(self.old, "选择旧文件"))
         self.od.clicked.connect(lambda: self._pick_dir(self.old))
@@ -446,6 +530,7 @@ class ReplacePage(QWidget):
         self.os.currentIndexChanged.connect(lambda i: self._sort(i, "old"))
         self.ns.currentIndexChanged.connect(lambda i: self._sort(i, "new"))
         self.run.clicked.connect(self._exec)
+        self.load_defaults()
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls(): e.acceptProposedAction()
@@ -528,8 +613,12 @@ class ReplacePage(QWidget):
 
         bdir = None
         if self.bak.isChecked():
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            bdir = os.path.join(os.path.dirname(self.old[0].path), f"_backup_{ts}")
+            custom = self.bakdir.text().strip()
+            if custom:
+                bdir = custom
+            else:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                bdir = os.path.join(os.path.dirname(self.old[0].path), f"_backup_{ts}")
             os.makedirs(bdir, exist_ok=True)
 
         ok = fail = 0
@@ -547,20 +636,52 @@ class ReplacePage(QWidget):
                         (f"，备份在 {bdir}" if bdir else ""),
                         self, position=InfoBarPosition.TOP, duration=5000)
 
+    def _pick_bakdir(self):
+        d = QFileDialog.getExistingDirectory(self, "选择备份目录")
+        if d: self.bakdir.setText(d)
+
+    def load_defaults(self, d: dict = None):
+        d = d or DEFAULT_SETTINGS["replace"]
+        self.bak.blockSignals(True); self.bak.setChecked(d.get("backup", False)); self.bak.blockSignals(False)
+        self.bakdir.blockSignals(True); self.bakdir.setText(d.get("backup_dir", "")); self.bakdir.blockSignals(False)
+        self.bakdir.setEnabled(self.bak.isChecked())
+
+    def to_dict(self) -> dict:
+        return {"backup": self.bak.isChecked(), "backup_dir": self.bakdir.text()}
+
 
 # ---------------------------------------------------------------------------
-# 关于
+# 设置 / 关于
 # ---------------------------------------------------------------------------
-class AboutPage(CardWidget):
+class SettingsPage(CardWidget):
+    resetRequested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(12)
+        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(14)
+
+        lay.addWidget(StrongBodyLabel("设置", self))
+        lay.addWidget(BodyLabel("所有设置（前缀、后缀、起始号、输出目录、备份开关等）会自动保存在你的用户目录下，下次打开自动恢复。", self))
+
         lay.addWidget(StrongBodyLabel("关于", self))
         lay.addWidget(BodyLabel(APP_TITLE, self))
-        lay.addWidget(CaptionLabel("版本 1.1  |  字体：OPPO Sans（免费商用）", self))
+        lay.addWidget(CaptionLabel("版本 1.2  |  字体：OPPO Sans（免费商用）", self))
         link = HyperlinkLabel("GitHub 仓库", self); link.setUrl(GITHUB_URL)
-        lay.addWidget(link); lay.addStretch(1)
+        lay.addWidget(link)
+
+        lay.addStretch(1)
+        self.btn_reset = PushButton("一键恢复默认设置", self, FIF.DELETE)
+        self.btn_reset.setStyleSheet("color:#c42b1c;")
+        self.btn_reset.clicked.connect(self._confirm_reset)
+        lay.addWidget(self.btn_reset, 0, Qt.AlignLeft)
+
+    def _confirm_reset(self):
+        ret = QMessageBox.question(self, "恢复默认",
+                                  "将清空所有自定义设置（前缀、目录、备份开关等），恢复成首次启动状态。继续？",
+                                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret == QMessageBox.Yes:
+            self.resetRequested.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -577,9 +698,9 @@ class MainWindow(FluentWindow):
         self.rr = RenameRulePage(self)
         self.ro = RenameOutputPage(self)
         self.rp = ReplacePage(self)
-        self.ab = AboutPage(self)
+        self.st = SettingsPage(self)
         for p, n in [(self.home, "home"), (self.rf, "rf"), (self.rr, "rr"),
-                     (self.ro, "ro"), (self.rp, "rp"), (self.ab, "ab")]:
+                     (self.ro, "ro"), (self.rp, "rp"), (self.st, "st")]:
             p.setObjectName(n)
 
         self.addSubInterface(self.home, FIF.HOME, "主页")
@@ -587,14 +708,43 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.rr, FIF.EDIT, "重命名：规则")
         self.addSubInterface(self.ro, FIF.SAVE, "重命名：输出")
         self.addSubInterface(self.rp, FIF.SYNC, "批量替换")
-        self.addSubInterface(self.ab, FIF.INFO, "关于", position=NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.st, FIF.SETTING, "设置", position=NavigationItemPosition.BOTTOM)
 
         self.rf.itemsChanged.connect(self._rp)
         self.rr.ruleChanged.connect(self._rp)
         self.ro.btn_run.clicked.connect(self._run_rename)
         self.home.goRename.connect(lambda: self.stackedWidget.setCurrentWidget(self.rf))
         self.home.goReplace.connect(lambda: self.stackedWidget.setCurrentWidget(self.rp))
+        self.st.resetRequested.connect(self._reset_settings)
+
+        # 加载上次设置
+        s = load_settings()
+        self.rr.load_defaults(s.get("rename", {}))
+        self.ro.load_defaults(s.get("rename_out", {}))
+        self.rp.load_defaults(s.get("replace", {}))
         self._rp()
+
+    def _reset_settings(self):
+        import shutil as _sh
+        defaults = json.loads(json.dumps(DEFAULT_SETTINGS))
+        self.rr.load_defaults(defaults["rename"])
+        self.ro.load_defaults(defaults["rename_out"])
+        self.rp.load_defaults(defaults["replace"])
+        save_settings(defaults)
+        self._rp()
+        InfoBar.success("已恢复默认", "所有设置已重置", self,
+                        position=InfoBarPosition.TOP, duration=2500)
+
+    def closeEvent(self, e):
+        try:
+            save_settings({
+                "rename": self.rr.to_dict(),
+                "rename_out": self.ro.to_dict(),
+                "replace": self.rp.to_dict(),
+            })
+        except Exception:
+            pass
+        super().closeEvent(e)
 
     def _rp(self):
         items = self.rf.items
