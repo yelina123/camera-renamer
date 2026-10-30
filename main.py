@@ -321,6 +321,20 @@ class RenameRulePage(CardWidget):
         r2.addWidget(BodyLabel("位", self)); r2.addStretch(1)
         lay.addLayout(r2)
 
+        # 统一 SpinBox 样式
+        spin_qss = """
+            QSpinBox {
+                border: 1px solid #d0d0d0; border-radius: 6px;
+                padding: 4px 8px; background: white; min-height: 20px;
+            }
+            QSpinBox:focus { border-color: #0067c0; }
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 18px; border: none; background: transparent;
+            }
+        """
+        for w in (self.start, self.end, self.digits):
+            w.setStyleSheet(spin_qss)
+
         r3 = QHBoxLayout()
         r3.addWidget(BodyLabel("固定后缀：", self))
         self.fsuffix = LineEdit(self); self.fsuffix.setPlaceholderText("例如 _v2（可留空）")
@@ -678,28 +692,41 @@ class ReplacePage(QWidget):
 # ---------------------------------------------------------------------------
 # 设置 / 关于
 # ---------------------------------------------------------------------------
-class SettingsPage(CardWidget):
+class SettingsPage(QWidget):
     resetRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(14)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20); root.setSpacing(16)
 
-        lay.addWidget(StrongBodyLabel("设置", self))
-        lay.addWidget(BodyLabel("所有设置（前缀、后缀、起始号、输出目录、备份开关等）会自动保存在你的用户目录下，下次打开自动恢复。", self))
-
-        lay.addWidget(StrongBodyLabel("关于", self))
-        lay.addWidget(BodyLabel(APP_TITLE, self))
-        lay.addWidget(CaptionLabel("版本 1.2  |  字体：OPPO Sans（免费商用）", self))
+        # —— 关于项目卡片 ——
+        card1 = CardWidget(self)
+        l1 = QVBoxLayout(card1)
+        l1.setContentsMargins(20, 16, 20, 16); l1.setSpacing(8)
+        l1.addWidget(StrongBodyLabel("关于项目", self))
+        l1.addWidget(BodyLabel(f"{APP_TITLE} v1.4", self))
+        l1.addWidget(CaptionLabel("相机照片批量重命名 + 批量替换内容工具", self))
+        l1.addWidget(CaptionLabel("字体：OPPO Sans（免费商用）", self))
+        l1.addWidget(CaptionLabel("作者：yelina123", self))
         link = HyperlinkLabel("GitHub 仓库", self); link.setUrl(GITHUB_URL)
-        lay.addWidget(link)
+        l1.addWidget(link)
+        root.addWidget(card1)
 
-        lay.addStretch(1)
-        self.btn_reset = PushButton("一键恢复默认设置", self, FIF.DELETE)
-        self.btn_reset.setStyleSheet("color:#c42b1c;")
+        # —— 数据管理卡片 ——
+        card2 = CardWidget(self)
+        l2 = QVBoxLayout(card2)
+        l2.setContentsMargins(20, 16, 20, 16); l2.setSpacing(8)
+        l2.addWidget(StrongBodyLabel("数据管理", self))
+        l2.addWidget(BodyLabel("所有设置（前缀、后缀、起始号、输出目录、备份开关等）会自动保存在用户目录下，下次打开自动恢复。", self))
+        self.btn_reset = PushButton("一键恢复默认设置", self)
+        self.btn_reset.setStyleSheet("color:#c42b1c; padding:6px 16px;")
+        self.btn_reset.setFixedWidth(180)
         self.btn_reset.clicked.connect(self._confirm_reset)
-        lay.addWidget(self.btn_reset, 0, Qt.AlignLeft)
+        l2.addWidget(self.btn_reset, 0, Qt.AlignLeft)
+        root.addWidget(card2)
+
+        root.addStretch(1)
 
     def _confirm_reset(self):
         ret = QMessageBox.question(self, "恢复默认",
