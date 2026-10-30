@@ -36,7 +36,7 @@ def resource_path(rel: str) -> str:
 
 DEFAULT_SETTINGS = {
     "rename": {
-        "prefix": "", "sep": 0, "start": 1, "end": 0,
+        "prefix": "", "start": 1, "end": 0,
         "zfill": True, "digits": 3, "fsuffix": "", "forcext": "",
     },
     "rename_out": {
@@ -299,11 +299,11 @@ class RenameRulePage(CardWidget):
         r1 = QHBoxLayout()
         r1.addWidget(BodyLabel("前缀：", self))
         self.prefix = LineEdit(self)
-        self.prefix.setPlaceholderText("例如 DSC（可留空）")
+        self.prefix.setPlaceholderText("例如 DSC_ 或 IMG-（分隔符直接写在前缀里）")
         r1.addWidget(self.prefix, 1)
-        r1.addWidget(BodyLabel("分隔符：", self))
-        self.sep = ComboBox(self); self.sep.addItems(["无", "_", "-"])
-        r1.addWidget(self.sep)
+        self.btn_detect = PushButton("从示例文件识别", self, FIF.SEARCH)
+        self.btn_detect.setToolTip("选一张现有照片，自动识别前缀和数字位数")
+        r1.addWidget(self.btn_detect)
         lay.addLayout(r1)
 
         r2 = QHBoxLayout()
@@ -338,20 +338,19 @@ class RenameRulePage(CardWidget):
         lay.addStretch(1)
 
         self.prefix.textChanged.connect(self._emit)
-        self.sep.currentIndexChanged.connect(self._emit)
         self.start.valueChanged.connect(self._emit)
         self.end.valueChanged.connect(self._emit)
         self.digits.valueChanged.connect(self._emit)
         self.zfill.stateChanged.connect(self._onzfill)
         self.fsuffix.textChanged.connect(self._emit)
         self.forcext.textChanged.connect(self._emit)
+        self.btn_detect.clicked.connect(self._detect)
         self._onzfill()
         self.load_defaults()
 
     def load_defaults(self, d: dict = None):
         d = d or DEFAULT_SETTINGS["rename"]
         self.prefix.blockSignals(True); self.prefix.setText(d.get("prefix", "")); self.prefix.blockSignals(False)
-        self.sep.blockSignals(True); self.sep.setCurrentIndex(d.get("sep", 0)); self.sep.blockSignals(False)
         self.start.blockSignals(True); self.start.setValue(d.get("start", 1)); self.start.blockSignals(False)
         self.end.blockSignals(True); self.end.setValue(d.get("end", 0)); self.end.blockSignals(False)
         self.zfill.blockSignals(True); self.zfill.setChecked(d.get("zfill", True)); self.zfill.blockSignals(False)
@@ -362,11 +361,38 @@ class RenameRulePage(CardWidget):
 
     def to_dict(self) -> dict:
         return {
-            "prefix": self.prefix.text(), "sep": self.sep.currentIndex(),
+            "prefix": self.prefix.text(),
             "start": self.start.value(), "end": self.end.value(),
             "zfill": self.zfill.isChecked(), "digits": self.digits.value(),
             "fsuffix": self.fsuffix.text(), "forcext": self.forcext.text(),
         }
+
+    def _detect(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选一张示例照片（识别前缀和位数）", "",
+                                              "图片文件 (*.jpg *.jpeg *.png *.cr2 *.nef *.arw *.dng *.raw *.tif *.tiff);;所有文件 (*)")
+        if not path:
+            return
+        base = os.path.splitext(os.path.basename(path))[0]
+        # 从右往左找连续数字
+        i = len(base) - 1
+        while i >= 0 and base[i].isdigit():
+            i -= 1
+        num_part = base[i+1:]
+        prefix_part = base[:i+1]
+        if not num_part:
+            InfoBar.warning("识别失败", "文件名末尾没有数字，无法自动识别", self,
+                            position=InfoBarPosition.TOP, duration=3000)
+            return
+        self.prefix.setText(prefix_part)
+        self.digits.setValue(len(num_part))
+        self.zfill.setChecked(True)
+        try:
+            self.start.setValue(int(num_part))
+        except ValueError:
+            pass
+        InfoBar.success("识别完成",
+                        f"前缀: {prefix_part}，位数: {len(num_part)}，起始号: {int(num_part)}",
+                        self, position=InfoBarPosition.TOP, duration=3000)
 
     def _onzfill(self): self.digits.setEnabled(self.zfill.isChecked())
     def _emit(self, *a): self.ruleChanged.emit()
@@ -374,9 +400,8 @@ class RenameRulePage(CardWidget):
     def compute(self, index: int, ext: str) -> str:
         n = self.start.value() + index
         prefix = self.prefix.text().strip()
-        sep = {0: "", 1: "_", 2: "-"}[self.sep.currentIndex()]
         num = str(n).zfill(self.digits.value()) if self.zfill.isChecked() else str(n)
-        name = f"{prefix}{sep}{num}" if prefix else num
+        name = f"{prefix}{num}" if prefix else num
         fs = self.fsuffix.text().strip()
         if fs: name += fs
         fe = self.forcext.text().strip()
