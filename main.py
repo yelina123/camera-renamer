@@ -15,14 +15,14 @@ from PySide6.QtCore import Qt, Signal, QSettings
 from PySide6.QtGui import QFontDatabase, QFont, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QTableWidgetItem, QHeaderView, QMessageBox, QSpinBox, QSizePolicy,
+    QTableWidgetItem, QHeaderView, QMessageBox, QSpinBox, QSizePolicy, QFrame,
 )
 from qfluentwidgets import (
     FluentWindow, NavigationItemPosition, setTheme, Theme,
     PushButton, ComboBox, CheckBox, LineEdit, BodyLabel,
     CaptionLabel, CardWidget, StrongBodyLabel, InfoBar, InfoBarPosition,
     FluentIcon as FIF, RadioButton, PrimaryPushButton, HyperlinkLabel,
-    TableWidget,
+    TableWidget, ScrollArea, setCustomStyleSheet,
 )
 
 APP_TITLE = "相机照片工具"
@@ -270,6 +270,7 @@ def make_table(table: TableWidget, headers: list[str]):
     table.setBorderVisible(True)
     table.setBorderRadius(8)
     h = table.horizontalHeader()
+    table.horizontalHeader().setMinimumSectionSize(24)
     h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
     for i in range(1, len(headers) - 1):
         h.setSectionResizeMode(i, QHeaderView.Stretch)
@@ -349,11 +350,16 @@ class RenameFilePage(QWidget):
         for w in (self.btn_add, self.btn_dir, self.btn_rm, self.btn_clr):
             bar.addWidget(w)
         bar.addStretch(1)
-        bar.addWidget(CaptionLabel("排序：", self))
-        bar.addWidget(self.sort)
         lay.addLayout(bar)
 
+        bar2 = QHBoxLayout()
+        bar2.addStretch(1)
+        bar2.addWidget(CaptionLabel("排序：", self))
+        bar2.addWidget(self.sort)
+        lay.addLayout(bar2)
+
         self.table = TableWidget(self)
+        self.table.setMinimumHeight(160)
         make_table(self.table, ["#", "原文件名", "新文件名（预览）", "大小"])
         lay.addWidget(self.table, 1)
         h = self.table.horizontalHeader()
@@ -455,17 +461,22 @@ class RenameRulePage(CardWidget):
         r2 = QHBoxLayout()
         r2.addWidget(BodyLabel("起始号：", self))
         self.start = QSpinBox(self); self.start.setRange(1, 999999); self.start.setValue(1)
-        self.start.setFixedWidth(110); r2.addWidget(self.start)
+        self.start.setFixedWidth(96); r2.addWidget(self.start)
+        r2.addSpacing(10)
         r2.addWidget(BodyLabel("终止号：", self))
         self.end = QSpinBox(self); self.end.setRange(0, 999999); self.end.setValue(0)
-        self.end.setSpecialValueText("自动"); self.end.setFixedWidth(110)
+        self.end.setSpecialValueText("自动"); self.end.setFixedWidth(96)
         r2.addWidget(self.end)
-        self.zfill = CheckBox("补零到", self); self.zfill.setChecked(True)
-        r2.addWidget(self.zfill)
-        self.digits = QSpinBox(self); self.digits.setRange(1, 10); self.digits.setValue(3)
-        self.digits.setFixedWidth(70); r2.addWidget(self.digits)
-        r2.addWidget(BodyLabel("位", self)); r2.addStretch(1)
+        r2.addStretch(1)
         lay.addLayout(r2)
+
+        r2b = QHBoxLayout()
+        self.zfill = CheckBox("补零到", self); self.zfill.setChecked(True)
+        r2b.addWidget(self.zfill)
+        self.digits = QSpinBox(self); self.digits.setRange(1, 10); self.digits.setValue(3)
+        self.digits.setFixedWidth(64); r2b.addWidget(self.digits)
+        r2b.addWidget(BodyLabel("位", self)); r2b.addStretch(1)
+        lay.addLayout(r2b)
 
         # 统一 SpinBox 样式
         spin_qss = """
@@ -487,15 +498,18 @@ class RenameRulePage(CardWidget):
         r3.addWidget(lab1)
         self.fsuffix = LineEdit(self); self.fsuffix.setPlaceholderText("例如 _v2（可留空）")
         self.fsuffix.setFixedWidth(200); r3.addWidget(self.fsuffix)
-        r3.addSpacing(20)
-        lab2 = BodyLabel("扩展名：", self)
-        lab2.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        r3.addWidget(lab2)
-        self.forcext = LineEdit(self)
-        self.forcext.setPlaceholderText("留空=保留原扩展名，填 .jpg 则强制改")
-        self.forcext.setFixedWidth(260); r3.addWidget(self.forcext)
         r3.addStretch(1)
         lay.addLayout(r3)
+
+        r3b = QHBoxLayout()
+        lab2 = BodyLabel("扩展名：", self)
+        lab2.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        r3b.addWidget(lab2)
+        self.forcext = LineEdit(self)
+        self.forcext.setPlaceholderText("留空=保留原扩展名，填 .jpg 则强制改")
+        self.forcext.setFixedWidth(260); r3b.addWidget(self.forcext)
+        r3b.addStretch(1)
+        lay.addLayout(r3b)
 
         lay.addWidget(StrongBodyLabel("实时预览", self))
         self.preview = BodyLabel("示例：DSC001.jpg", self)
@@ -719,8 +733,16 @@ class ReplacePage(QWidget):
         self._build(); self.setAcceptDrops(True)
 
     def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16); lay.setSpacing(10)
+        """内容放进滚动区，底部操作栏固定在页面上，窗口再小按钮也点得到。"""
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8); root.setSpacing(8)
+
+        self.scroll = ScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.body = QWidget(self.scroll)
+        lay = QVBoxLayout(self.body)
+        lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(10)
 
         top = QHBoxLayout(); top.setSpacing(10)
         # 左
@@ -733,9 +755,13 @@ class ReplacePage(QWidget):
         self.os = ComboBox(self)
         self.os.addItems(["名称↑", "名称↓", "时间↑", "时间↓", "大小↑", "大小↓"])
         for w in (self.oa, self.od, self.oc): lb.addWidget(w)
-        lb.addStretch(1); lb.addWidget(CaptionLabel("排序：", self)); lb.addWidget(self.os)
+        lb.addStretch(1)
         lc.addLayout(lb)
-        self.ot = TableWidget(self); make_table(self.ot, ["#", "文件名", "大小"])
+        lb2 = QHBoxLayout()
+        lb2.addStretch(1); lb2.addWidget(CaptionLabel("排序：", self)); lb2.addWidget(self.os)
+        lc.addLayout(lb2)
+        self.ot = TableWidget(self); self.ot.setMinimumHeight(130)
+        make_table(self.ot, ["#", "文件名", "大小"])
         lc.addWidget(self.ot, 1)
         top.addLayout(lc, 1)
         # 右
@@ -748,35 +774,50 @@ class ReplacePage(QWidget):
         self.ns = ComboBox(self)
         self.ns.addItems(["名称↑", "名称↓", "时间↑", "时间↓", "大小↑", "大小↓"])
         for w in (self.na, self.nd, self.nc): rb.addWidget(w)
-        rb.addStretch(1); rb.addWidget(CaptionLabel("排序：", self)); rb.addWidget(self.ns)
+        rb.addStretch(1)
         rc.addLayout(rb)
-        self.nt = TableWidget(self); make_table(self.nt, ["#", "文件名", "大小"])
+        rb2 = QHBoxLayout()
+        rb2.addStretch(1); rb2.addWidget(CaptionLabel("排序：", self)); rb2.addWidget(self.ns)
+        rc.addLayout(rb2)
+        self.nt = TableWidget(self); self.nt.setMinimumHeight(130)
+        make_table(self.nt, ["#", "文件名", "大小"])
         rc.addWidget(self.nt, 1)
         top.addLayout(rc, 1)
         lay.addLayout(top, 2)
 
         lay.addWidget(StrongBodyLabel("对应关系", self))
         self.mt = TableWidget(self)
+        self.mt.setMinimumHeight(140)
         make_table(self.mt, ["#", "旧文件（保留名）", "←", "新文件（内容来源）"])
         lay.addWidget(self.mt, 2)
 
-        bot = QHBoxLayout()
-        self.bak = CheckBox("替换前备份旧文件", self)
-        self.bak.setChecked(False)
-        bot.addWidget(self.bak)
-        bot.addStretch(1)
-        self.run = PrimaryPushButton("执行替换", self, FIF.ACCEPT)
-        self.run.setFixedHeight(38); bot.addWidget(self.run)
-        lay.addLayout(bot)
-
         # 备份目录行
         brow = QHBoxLayout()
-        brow.addWidget(CaptionLabel("备份目录（留空=旧文件旁 _backup_时间戳）：", self))
+        lab_bak = CaptionLabel("备份目录：", self)
+        lab_bak.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        brow.addWidget(lab_bak)
         self.bakdir = LineEdit(self)
-        self.bakdir.setPlaceholderText("留空则自动在旧文件旁边建备份目录")
+        self.bakdir.setPlaceholderText("留空则自动在旧文件旁建 _backup_时间戳")
         self.bakbrowse = PushButton("浏览…", self, FIF.FOLDER)
         brow.addWidget(self.bakdir, 1); brow.addWidget(self.bakbrowse)
         lay.addLayout(brow)
+        lay.addStretch(1)
+
+        self.scroll.setWidget(self.body)
+        root.addWidget(self.scroll, 1)
+
+        # 固定底栏（独立卡片，滚动内容不会压到它）
+        self.bar_card = CardWidget(self)
+        bot = QHBoxLayout(self.bar_card)
+        bot.setContentsMargins(14, 8, 14, 8)
+        self.bak = CheckBox("替换前备份旧文件", self.bar_card)
+        self.bak.setChecked(False)
+        bot.addWidget(self.bak)
+        bot.addStretch(1)
+        self.run = PrimaryPushButton("执行替换", self.bar_card, FIF.ACCEPT)
+        self.run.setFixedHeight(38); bot.addWidget(self.run)
+        root.addWidget(self.bar_card)
+
         self.bakbrowse.clicked.connect(self._pick_bakdir)
         self.bak.toggled.connect(lambda: self.bakdir.setEnabled(self.bak.isChecked()))
         self.bakdir.setEnabled(False)
@@ -928,7 +969,9 @@ class SettingsPage(QWidget):
         l1.addWidget(StrongBodyLabel("关于项目", self))
         l1.addWidget(BodyLabel(f"{APP_TITLE} v1.5", self))
         l1.addWidget(CaptionLabel("相机照片批量重命名 + 批量替换内容工具", self))
-        l1.addWidget(CaptionLabel("支持识别相机存储卡，自动接续编号并直接导入", self))
+        w1 = CaptionLabel("支持识别相机存储卡，自动接续编号并直接导入", self)
+        w1.setWordWrap(True)
+        l1.addWidget(w1)
         l1.addWidget(CaptionLabel("字体：OPPO Sans（免费商用）", self))
         l1.addWidget(CaptionLabel("作者：yelina123", self))
         link = HyperlinkLabel("GitHub 仓库", self); link.setUrl(GITHUB_URL)
@@ -940,9 +983,12 @@ class SettingsPage(QWidget):
         l2 = QVBoxLayout(card2)
         l2.setContentsMargins(20, 16, 20, 16); l2.setSpacing(8)
         l2.addWidget(StrongBodyLabel("数据管理", self))
-        l2.addWidget(BodyLabel("所有设置（前缀、后缀、起始号、输出目录、备份开关等）会自动保存在用户目录下，下次打开自动恢复。", self))
+        d1 = BodyLabel("所有设置（前缀、后缀、起始号、输出目录、备份开关等）会自动保存在用户目录下，下次打开自动恢复。", self)
+        d1.setWordWrap(True)
+        l2.addWidget(d1)
         self.btn_reset = PushButton("一键恢复默认设置", self)
-        self.btn_reset.setStyleSheet("color:#c42b1c; padding:6px 16px;")
+        setCustomStyleSheet(self.btn_reset, "PushButton{color:#c42b1c;}",
+                            "PushButton{color:#ff99a4;}")
         self.btn_reset.setFixedWidth(180)
         self.btn_reset.clicked.connect(self._confirm_reset)
         l2.addWidget(self.btn_reset, 0, Qt.AlignLeft)
@@ -965,7 +1011,8 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1100, 750)
+        # 允许缩到很小；内容超出时由滚动区接管，按钮不会够不着
+        self.setMinimumSize(640, 420)
 
         self.home = HomePage(self)
         self.rf = RenameFilePage(self)
@@ -973,23 +1020,29 @@ class MainWindow(FluentWindow):
         self.ro = RenameOutputPage(self)
         self.rp = ReplacePage(self)
         self.st = SettingsPage(self)
-        for p, n in [(self.home, "home"), (self.rf, "rf"), (self.rr, "rr"),
-                     (self.ro, "ro"), (self.rp, "rp"), (self.st, "st")]:
-            p.setObjectName(n)
+        self.home.setObjectName("home")
+
+        # 每个功能页套一层滚动区：窗口再小也能滚到所有控件
+        self.w_rf = self._scrolled(self.rf, "rf")
+        self.w_rr = self._scrolled(self.rr, "rr")
+        self.w_ro = self._scrolled(self.ro, "ro")
+        self.w_rp = self.rp
+        self.rp.setObjectName("rp")
+        self.w_st = self._scrolled(self.st, "st")
 
         self.addSubInterface(self.home, FIF.HOME, "主页")
-        self.addSubInterface(self.rf, FIF.FOLDER, "重命名：文件")
-        self.addSubInterface(self.rr, FIF.EDIT, "重命名：规则")
-        self.addSubInterface(self.ro, FIF.SAVE, "重命名：输出")
-        self.addSubInterface(self.rp, FIF.SYNC, "批量替换")
-        self.addSubInterface(self.st, FIF.SETTING, "设置", position=NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.w_rf, FIF.FOLDER, "重命名：文件")
+        self.addSubInterface(self.w_rr, FIF.EDIT, "重命名：规则")
+        self.addSubInterface(self.w_ro, FIF.SAVE, "重命名：输出")
+        self.addSubInterface(self.w_rp, FIF.SYNC, "批量替换")
+        self.addSubInterface(self.w_st, FIF.SETTING, "设置", position=NavigationItemPosition.BOTTOM)
 
         self.rf.itemsChanged.connect(self._rp)
         self.rr.ruleChanged.connect(self._rp)
         self.ro.btn_run.clicked.connect(self._run_rename)
         self.ro.cameraDetected.connect(self._apply_camera)
-        self.home.goRename.connect(lambda: self.stackedWidget.setCurrentWidget(self.rf))
-        self.home.goReplace.connect(lambda: self.stackedWidget.setCurrentWidget(self.rp))
+        self.home.goRename.connect(lambda: self.stackedWidget.setCurrentWidget(self.w_rf))
+        self.home.goReplace.connect(lambda: self.stackedWidget.setCurrentWidget(self.w_rp))
         self.st.resetRequested.connect(self._reset_settings)
 
         # 加载上次设置
@@ -998,6 +1051,37 @@ class MainWindow(FluentWindow):
         self.ro.load_defaults(s.get("rename_out", {}))
         self.rp.load_defaults(s.get("replace", {}))
         self._rp()
+        self._restore_geometry(s.get("window", {}))
+
+    def _scrolled(self, page: QWidget, name: str) -> ScrollArea:
+        sa = ScrollArea(self)
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setWidget(page)
+        sa.setObjectName(name)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sa.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        return sa
+
+    def _restore_geometry(self, d: dict):
+        """恢复上次窗口大小；首次启动按屏幕比例给一个合适的尺寸并居中。
+
+        4K/高缩放屏上屏幕可用区域（逻辑像素）可能只有 1920×1080 左右，
+        取 72% 既不会一开就顶满，也不会小到看不清。
+        """
+        avail = self.screen().availableGeometry()
+        if d.get("w") and d.get("h"):
+            w, h = int(d["w"]), int(d["h"])
+        else:
+            w = min(1500, max(1000, int(avail.width() * 0.72)))
+            h = min(1000, max(700, int(avail.height() * 0.72)))
+        w = max(640, min(w, avail.width()))
+        h = max(420, min(h, avail.height()))
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2,
+                  avail.y() + (avail.height() - h) // 2)
+        if d.get("max"):
+            self.showMaximized()
 
     def _apply_camera(self, cam):
         self.rr.apply_camera(cam)
@@ -1020,10 +1104,12 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, e):
         try:
+            g = self.normalGeometry() if self.isMaximized() else self.geometry()
             save_settings({
                 "rename": self.rr.to_dict(),
                 "rename_out": self.ro.to_dict(),
                 "replace": self.rp.to_dict(),
+                "window": {"w": g.width(), "h": g.height(), "max": self.isMaximized()},
             })
         except Exception:
             pass
