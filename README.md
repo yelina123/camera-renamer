@@ -2,6 +2,11 @@
 
 Windows 10 / 11 下的 GUI 批量重命名工具，专为「往相机里导图片」设计：识别相机存储卡、自动接续编号、一键导入。
 
+## 下载
+
+直接下打包好的 Windows 版：[Releases](https://github.com/yelina123/camera-renamer/releases/latest)
+（`camera-renamer-windows-x64.zip`，解压后双击 `camera-renamer/camera-renamer.exe`，不用装 Python）
+
 ## 功能
 
 - 拖入照片，或选择一个文件夹批量处理
