@@ -1102,10 +1102,14 @@ class MainWindow(FluentWindow):
         names = [self.rr.compute(i, it.ext) for i, it in enumerate(items)]
         dup = len({n.lower() for n in names}) != len(names)
         cmode = self.ro.conflict.currentText()
+        last_no = self.rr.start.value() + len(items) - 1
+        over = self.rr.zfill.isChecked() and last_no >= 10 ** self.rr.digits.value()
 
         msg = (f"将把 {len(items)} 个文件导入相机：\n{cam.root}\n\n"
                f"首个：{names[0]}\n末个：{names[-1]}\n同名处理：{cmode}\n\n"
                "原文件不会被修改，只往相机里复制。")
+        if over:
+            msg += f"\n\n⚠ 末尾编号 {last_no} 超出 {self.rr.digits.value()} 位数的上限，相机可能不认。"
         if dup:
             msg += "\n\n⚠ 生成的文件名有重复，请检查位数/起始号设置！"
         ret = QMessageBox.question(self, "导入到相机", msg,
