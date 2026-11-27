@@ -1,0 +1,44 @@
+name: 构建 Windows 版
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "main.py"
+      - "assets/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install PySide6 PySide6-Fluent-Widgets pyinstaller
+
+      - name: PyInstaller 打包
+        run: python -m PyInstaller -w -n camera-renamer --noconfirm --add-data "assets/fonts;assets/fonts" main.py
+
+      - name: 校验产物并压缩
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/camera-renamer/camera-renamer.exe")) {
+            Write-Error "未生成 camera-renamer.exe"
+            exit 1
+          }
+          $size = (Get-ChildItem -Recurse dist/camera-renamer | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host ("产物大小: {0:N1} MB" -f $size)
+          Compress-Archive -Path dist/camera-renamer -DestinationPath camera-renamer-windows-x64.zip
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-renamer-windows-x64
+          path: camera-renamer-windows-x64.zip
+          retention-days: 30

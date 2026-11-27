@@ -5,6 +5,7 @@
 - OPPO Sans 字体（免费商用）
 """
 import os
+import re
 import sys
 import json
 import shutil
@@ -14,7 +15,7 @@ from PySide6.QtCore import Qt, Signal, QSettings
 from PySide6.QtGui import QFontDatabase, QFont, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QTableWidgetItem, QHeaderView, QMessageBox, QSpinBox,
+    QTableWidgetItem, QHeaderView, QMessageBox, QSpinBox, QSizePolicy,
 )
 from qfluentwidgets import (
     FluentWindow, NavigationItemPosition, setTheme, Theme,
@@ -103,16 +104,161 @@ def add_paths(items: list[FileItem], paths: list[str]) -> int:
     return added
 
 
+_NAT_RE = re.compile(r"(\d+)")
+
+
+def natural_key(s: str):
+    """自然排序键：把字符串里的数字段按数值比较。
+
+    幻灯片 1 / 幻灯片 2 / 幻灯片 10 -> 1, 2, 10
+    而不是字典序 1, 10, 2。
+    """
+    parts = _NAT_RE.split(s.lower())
+    key = []
+    for i, p in enumerate(parts):
+        if i % 2 == 1:      # 数字段
+            key.append((0, int(p)))
+        else:               # 文本段
+            key.append((1, p))
+    key.append((1, s.lower()))   # 等值时用原串兜底，保证顺序稳定
+    return key
+
+
 def sort_items(items: list[FileItem], key: str, asc: bool):
-    kf = {"name": lambda it: it.name.lower(),
-          "mtime": lambda it: it.mtime,
-          "size": lambda it: it.size}[key]
+    kf = {"name": lambda it: natural_key(it.name),
+          "mtime": lambda it: (it.mtime, natural_key(it.name)),
+          "size": lambda it: (it.size, natural_key(it.name))}[key]
     items.sort(key=kf, reverse=not asc)
 
 
 def size_str(n: int) -> str:
     kb = n / 1024
     return f"{kb:.1f} KB" if kb < 1024 else f"{kb/1024:.2f} MB"
+
+
+# ---------------------------------------------------------------------------
+# 相机识别
+#   典型目录结构：D:\DCIM\100MEDIA\100_0123.jpeg
+#   也兼容 100CANON / 100MSDCF / 100APPLE 这类写法
+# ---------------------------------------------------------------------------
+IMAGE_EXTS = {
+    ".jpg", ".jpeg", ".jpe", ".png", ".heic", ".heif", ".tif", ".tiff",
+    ".bmp", ".gif", ".webp", ".cr2", ".cr3", ".nef", ".arw", ".dng",
+    ".raf", ".orf", ".rw2", ".pef", ".srw",
+}
+
+MEDIA_DIR_RE = re.compile(r"^(\d{3})([A-Za-z]+)$")     # 100MEDIA
+CAM_NAME_RE = re.compile(r"^(.+?)(\d+)(\.[A-Za-z0-9]+)$")  # 100_0123.jpeg
+
+
+@dataclass
+class CameraInfo:
+    root: str          # 媒体目录，如 D:\DCIM\100MEDIA
+    drive: str         # 盘符，如 D:\
+    folder: str        # 媒体目录名，如 100MEDIA
+    prefix: str        # 文件名里的前缀，如 100_
+    digits: int        # 数字位数，如 4
+    last_num: int      # 相机里已有最大编号，如 123
+    count: int         # 该目录图片数量
+    last_file: str     # 最后一支文件名
+    ext: str           # 该目录的扩展名，如 .jpeg
+    mtime: float = 0.0
+
+    @property
+    def next_num(self) -> int:
+        return self.last_num + 1
+
+    @property
+    def overflow(self) -> bool:
+        return self.next_num >= 10 ** self.digits
+
+    @property
+    def next_name(self) -> str:
+        return f"{self.prefix}{str(self.next_num).zfill(self.digits)}{self.ext}"
+
+    @property
+    def summary(self) -> str:
+        return f"{self.drive}  ·  DCIM\\{self.folder}  ·  已有 {self.count} 张，最后一张 {self.last_file}"
+
+
+def _drive_roots(roots=None) -> list[str]:
+    """枚举可能的相机盘符。Windows 下扫 A:-Z:；其他平台供测试用。"""
+    if roots is not None:
+        return list(roots)
+    out = []
+    if os.name == "nt":
+        import string
+        for letter in string.ascii_uppercase:
+            d = f"{letter}:\\"
+            if os.path.isdir(d):
+                out.append(d)
+    else:
+        env = os.environ.get("CAMERA_TEST_ROOT")
+        if env:
+            out.append(env)
+    return out
+
+
+def _analyze_media_dir(path: str, drive: str, folder: str):
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return None
+
+    count = 0
+    best = None  # (编号, 前缀, 位数, 扩展名, 文件名)
+    for f in names:
+        ext = os.path.splitext(f)[1]
+        if ext.lower() not in IMAGE_EXTS:
+            continue
+        m = CAM_NAME_RE.match(f)
+        if not m:
+            continue
+        count += 1
+        num = int(m.group(2))
+        cand = (num, m.group(1), len(m.group(2)), ext, f)
+        if best is None or cand[0] > best[0]:
+            best = cand
+
+    if not best:
+        return None
+
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        mt = 0.0
+
+    num, prefix, digits, ext, fname = best
+    return CameraInfo(root=path, drive=drive, folder=folder, prefix=prefix,
+                      digits=digits, last_num=num, count=count, last_file=fname,
+                      ext=ext, mtime=mt)
+
+
+def scan_cameras(roots=None) -> list[CameraInfo]:
+    """扫描所有盘符，返回识别到的相机媒体目录（每个盘符取最近使用的一个）。"""
+    found = []
+    for drive in _drive_roots(roots):
+        dcim = os.path.join(drive, "DCIM")
+        if not os.path.isdir(dcim):
+            continue
+        try:
+            subs = [d for d in os.listdir(dcim)
+                    if MEDIA_DIR_RE.match(d) and os.path.isdir(os.path.join(dcim, d))]
+        except OSError:
+            continue
+
+        best = None
+        for sub in subs:
+            info = _analyze_media_dir(os.path.join(dcim, sub), drive, sub)
+            if not info:
+                continue
+            # 取最近改动过的那个目录（相机换号后会新建 101MEDIA）
+            if best is None or (info.mtime, info.count, info.last_num) > \
+                               (best.mtime, best.count, best.last_num):
+                best = info
+        if best:
+            found.append(best)
+    return found
 
 
 def make_table(table: TableWidget, headers: list[str]):
@@ -155,7 +301,7 @@ class HomePage(QWidget):
         l1.setContentsMargins(24, 24, 24, 24)
         l1.setSpacing(10)
         l1.addWidget(StrongBodyLabel("📝 批量重命名", self))
-        l1.addWidget(BodyLabel("给文件加前缀和编号\n例如 DSC001.jpg, DSC002.jpg", self))
+        l1.addWidget(BodyLabel("给文件加前缀和编号，可直接导入相机\n例如 DSC001.jpg, DSC002.jpg", self))
         l1.addStretch(1)
         b1 = PrimaryPushButton("进入重命名", self)
         b1.clicked.connect(self.goRename.emit)
@@ -199,7 +345,7 @@ class RenameFilePage(QWidget):
         self.btn_clr = PushButton("清空", self, FIF.CANCEL)
         self.sort = ComboBox(self)
         self.sort.addItems(["名称↑", "名称↓", "时间↑", "时间↓", "大小↑", "大小↓"])
-        self.sort.setCurrentIndex(1)
+        self.sort.setCurrentIndex(0)
         for w in (self.btn_add, self.btn_dir, self.btn_rm, self.btn_clr):
             bar.addWidget(w)
         bar.addStretch(1)
@@ -336,13 +482,19 @@ class RenameRulePage(CardWidget):
             w.setStyleSheet(spin_qss)
 
         r3 = QHBoxLayout()
-        r3.addWidget(BodyLabel("固定后缀：", self))
+        lab1 = BodyLabel("固定后缀：", self)
+        lab1.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        r3.addWidget(lab1)
         self.fsuffix = LineEdit(self); self.fsuffix.setPlaceholderText("例如 _v2（可留空）")
-        self.fsuffix.setMaximumWidth(200); r3.addWidget(self.fsuffix)
-        r3.addWidget(BodyLabel("扩展名：", self))
+        self.fsuffix.setFixedWidth(200); r3.addWidget(self.fsuffix)
+        r3.addSpacing(20)
+        lab2 = BodyLabel("扩展名：", self)
+        lab2.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        r3.addWidget(lab2)
         self.forcext = LineEdit(self)
         self.forcext.setPlaceholderText("留空=保留原扩展名，填 .jpg 则强制改")
-        self.forcext.setMaximumWidth(240); r3.addWidget(self.forcext, 1)
+        self.forcext.setFixedWidth(260); r3.addWidget(self.forcext)
+        r3.addStretch(1)
         lay.addLayout(r3)
 
         lay.addWidget(StrongBodyLabel("实时预览", self))
@@ -408,6 +560,17 @@ class RenameRulePage(CardWidget):
                         f"前缀: {prefix_part}，位数: {len(num_part)}，起始号: {int(num_part)}",
                         self, position=InfoBarPosition.TOP, duration=3000)
 
+    def apply_camera(self, cam):
+        """按相机已有文件自动填好命名规则（接续相机最后一号）。"""
+        self.prefix.setText(cam.prefix)
+        self.zfill.setChecked(True)
+        self.digits.setValue(cam.digits)
+        self.start.setValue(min(cam.next_num, self.start.maximum()))
+        self.end.setValue(0)
+        self.forcext.setText(cam.ext)
+        self._emit()
+        self.refresh_preview(cam.ext)
+
     def _onzfill(self): self.digits.setEnabled(self.zfill.isChecked())
     def _emit(self, *a): self.ruleChanged.emit()
 
@@ -434,55 +597,113 @@ class RenameRulePage(CardWidget):
 # 重命名：输出
 # ---------------------------------------------------------------------------
 class RenameOutputPage(CardWidget):
+    cameraDetected = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.camera = None
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(14)
+        lay.setContentsMargins(24, 18, 24, 18); lay.setSpacing(10)
         lay.addWidget(StrongBodyLabel("输出位置", self))
+
         self.rb_copy = RadioButton("复制到新目录（推荐，原文件不动）", self)
-        self.rb_copy.setChecked(True); lay.addWidget(self.rb_copy)
+        self.rb_copy.setChecked(True)
+        lay.addWidget(self.rb_copy)
         rd = QHBoxLayout()
         self.dir = LineEdit(self); self.dir.setPlaceholderText("选择输出目录")
         self.browse = PushButton("浏览…", self, FIF.FOLDER)
         rd.addWidget(self.dir, 1); rd.addWidget(self.browse)
         lay.addLayout(rd)
+
         self.rb_in = RadioButton("原地重命名（直接改原文件名，不可撤销）", self)
-        self.rb_in.setStyleSheet("color:#c42b1c;"); lay.addWidget(self.rb_in)
-        lay.addWidget(StrongBodyLabel("目标目录已存在同名文件时", self))
+        self.rb_in.setStyleSheet("color:#c42b1c;")
+        lay.addWidget(self.rb_in)
+
+        self.rb_cam = RadioButton("直接导入相机（自动接续相机里已有的编号）", self)
+        lay.addWidget(self.rb_cam)
+        camcard = CardWidget(self)
+        cl = QHBoxLayout(camcard)
+        cl.setContentsMargins(14, 10, 14, 10); cl.setSpacing(10)
+        self.cam_label = CaptionLabel("正在查找相机…", camcard)
+        self.cam_label.setWordWrap(True)
+        self.cam_refresh = PushButton("重新检测", camcard, FIF.SYNC)
+        cl.addWidget(self.cam_label, 1); cl.addWidget(self.cam_refresh)
+        lay.addWidget(camcard)
+
+        lay.addWidget(StrongBodyLabel("目标位置已存在同名文件时", self))
         self.conflict = ComboBox(self); self.conflict.addItems(["跳过", "覆盖", "中止并报错"])
         lay.addWidget(self.conflict)
         lay.addStretch(1)
         self.btn_run = PrimaryPushButton("执行重命名", self, FIF.ACCEPT)
         self.btn_run.setFixedHeight(40); self.btn_run.setMinimumWidth(200)
         lay.addWidget(self.btn_run, 0, Qt.AlignRight)
+
         self.browse.clicked.connect(self._pick)
-        self.rb_copy.toggled.connect(self._onmode)
+        self.cam_refresh.clicked.connect(lambda: self.refresh_camera(autofill=True))
+        for rb in (self.rb_copy, self.rb_in, self.rb_cam):
+            rb.toggled.connect(self._onmode)
         self.load_defaults()
+
+    def mode(self) -> str:
+        if self.rb_cam.isChecked(): return "camera"
+        if self.rb_in.isChecked(): return "inplace"
+        return "copy"
 
     def load_defaults(self, d: dict = None):
         d = d or DEFAULT_SETTINGS["rename_out"]
-        if d.get("mode", "copy") == "inplace":
+        self.dir.setText(d.get("dir", ""))
+        self.conflict.setCurrentIndex(d.get("conflict", 0))
+        self.refresh_camera()
+        m = d.get("mode", "copy")
+        if m == "camera" and self.camera:
+            self.rb_cam.setChecked(True)   # 触发 _onmode，自动接续编号
+        elif m == "inplace":
             self.rb_in.setChecked(True)
         else:
             self.rb_copy.setChecked(True)
-        self.dir.setText(d.get("dir", ""))
-        self.conflict.setCurrentIndex(d.get("conflict", 0))
         self._onmode()
 
     def to_dict(self) -> dict:
         return {
-            "mode": "inplace" if self.rb_in.isChecked() else "copy",
+            "mode": self.mode(),
             "dir": self.dir.text(),
             "conflict": self.conflict.currentIndex(),
         }
+
+    def refresh_camera(self, autofill=False):
+        """扫描相机。autofill=True 时把识别结果发给命名规则页。"""
+        cams = scan_cameras()
+        self.camera = cams[0] if cams else None
+        if self.camera:
+            c = self.camera
+            tip = (f"{c.drive}  ·  DCIM\\{c.folder}  ·  已有 {c.count} 张，"
+                   f"最后一张 {c.last_file}  →  下一张 {c.next_name}")
+            if c.overflow:
+                tip += "\n⚠ 编号将超出当前位数，建议调大位数或更换目录"
+            self.cam_label.setText(tip)
+            self.cam_label.setStyleSheet("color:#0067c0;")
+            self.rb_cam.setEnabled(True)
+            if autofill:
+                self.cameraDetected.emit(c)
+        else:
+            self.cam_label.setText("未检测到相机：连接相机或插入存储卡后点「重新检测」")
+            self.cam_label.setStyleSheet("color:#888888;")
+            self.rb_cam.setEnabled(False)
+            if self.rb_cam.isChecked():
+                self.rb_copy.setChecked(True)
 
     def _pick(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if d: self.dir.setText(d)
 
-    def _onmode(self):
-        c = self.rb_copy.isChecked()
-        self.dir.setEnabled(c); self.browse.setEnabled(c); self.conflict.setEnabled(c)
+    def _onmode(self, *a):
+        m = self.mode()
+        self.dir.setEnabled(m == "copy")
+        self.browse.setEnabled(m == "copy")
+        self.conflict.setEnabled(m != "inplace")
+        self.btn_run.setText("导入到相机" if m == "camera" else "执行重命名")
+        if m == "camera":
+            self.refresh_camera(autofill=True)
 
 
 # ---------------------------------------------------------------------------
@@ -705,8 +926,9 @@ class SettingsPage(QWidget):
         l1 = QVBoxLayout(card1)
         l1.setContentsMargins(20, 16, 20, 16); l1.setSpacing(8)
         l1.addWidget(StrongBodyLabel("关于项目", self))
-        l1.addWidget(BodyLabel(f"{APP_TITLE} v1.4", self))
+        l1.addWidget(BodyLabel(f"{APP_TITLE} v1.5", self))
         l1.addWidget(CaptionLabel("相机照片批量重命名 + 批量替换内容工具", self))
+        l1.addWidget(CaptionLabel("支持识别相机存储卡，自动接续编号并直接导入", self))
         l1.addWidget(CaptionLabel("字体：OPPO Sans（免费商用）", self))
         l1.addWidget(CaptionLabel("作者：yelina123", self))
         link = HyperlinkLabel("GitHub 仓库", self); link.setUrl(GITHUB_URL)
@@ -765,6 +987,7 @@ class MainWindow(FluentWindow):
         self.rf.itemsChanged.connect(self._rp)
         self.rr.ruleChanged.connect(self._rp)
         self.ro.btn_run.clicked.connect(self._run_rename)
+        self.ro.cameraDetected.connect(self._apply_camera)
         self.home.goRename.connect(lambda: self.stackedWidget.setCurrentWidget(self.rf))
         self.home.goReplace.connect(lambda: self.stackedWidget.setCurrentWidget(self.rp))
         self.st.resetRequested.connect(self._reset_settings)
@@ -775,6 +998,14 @@ class MainWindow(FluentWindow):
         self.ro.load_defaults(s.get("rename_out", {}))
         self.rp.load_defaults(s.get("replace", {}))
         self._rp()
+
+    def _apply_camera(self, cam):
+        self.rr.apply_camera(cam)
+        self._rp()
+        InfoBar.success(
+            "已接续相机编号",
+            f"前缀 {cam.prefix} · {cam.digits} 位 · 起始 {cam.next_num} · 扩展名 {cam.ext}",
+            self, position=InfoBarPosition.TOP, duration=4000)
 
     def _reset_settings(self):
         import shutil as _sh
@@ -815,7 +1046,8 @@ class MainWindow(FluentWindow):
             InfoBar.error("号段不足", f"需要 {len(items)} 个编号，但 {s}~{e} 只有 {e-s+1} 个",
                           self, position=InfoBarPosition.TOP, duration=3500); return
         if self.ro.rb_copy.isChecked(): self._rename_copy(items)
-        else: self._rename_inplace(items)
+        elif self.ro.rb_in.isChecked(): self._rename_inplace(items)
+        else: self._rename_to_camera(items)
 
     def _rename_copy(self, items):
         d = self.ro.dir.text().strip()
@@ -860,6 +1092,46 @@ class MainWindow(FluentWindow):
             except OSError: fl += 1
         InfoBar.success("完成", f"原地重命名成功 {ok} 个，失败 {fl} 个",
                         self, position=InfoBarPosition.TOP, duration=3500)
+
+    def _rename_to_camera(self, items):
+        cam = self.ro.camera
+        if not cam:
+            InfoBar.error("未检测到相机", "请连接相机或插入存储卡后点「重新检测」",
+                          self, position=InfoBarPosition.TOP, duration=3500); return
+
+        names = [self.rr.compute(i, it.ext) for i, it in enumerate(items)]
+        dup = len({n.lower() for n in names}) != len(names)
+        cmode = self.ro.conflict.currentText()
+
+        msg = (f"将把 {len(items)} 个文件导入相机：\n{cam.root}\n\n"
+               f"首个：{names[0]}\n末个：{names[-1]}\n同名处理：{cmode}\n\n"
+               "原文件不会被修改，只往相机里复制。")
+        if dup:
+            msg += "\n\n⚠ 生成的文件名有重复，请检查位数/起始号设置！"
+        ret = QMessageBox.question(self, "导入到相机", msg,
+                                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes: return
+
+        mode = self.ro.conflict.currentIndex()
+        ok = sk = fl = 0
+        for i, it in enumerate(items):
+            t = os.path.join(cam.root, names[i])
+            if os.path.exists(t):
+                if mode == 0: sk += 1; continue
+                if mode == 2:
+                    InfoBar.error("冲突中止", f"相机里已存在：{names[i]}",
+                                  self, position=InfoBarPosition.TOP, duration=5000); return
+            try:
+                shutil.copy2(it.path, t); ok += 1
+            except OSError as e:
+                fl += 1
+                print("import to camera failed:", e)
+
+        if ok:
+            self.ro.refresh_camera()   # 刷新"最后一号"，方便连续导入
+        InfoBar.success("导入完成",
+                        f"成功 {ok} 个，跳过 {sk} 个，失败 {fl} 个 → {cam.folder}",
+                        self, position=InfoBarPosition.TOP, duration=4500)
 
 
 def main():
